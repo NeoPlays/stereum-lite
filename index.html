@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html>
   <head>
-    <meta charset="UTF-8" http-equiv="Content-Security-Policy" content="default-src 'self'"/>
-    <title>Hello World!</title>
+    <meta charset="UTF-8"/>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';">
+    <title>Stereum Lite</title>
+    <link rel="stylesheet" href="index.css">
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="/src/renderer.ts"></script>
+    <script type="module" src="/src/renderer/renderer.ts"></script>
   </body>
 </html>
