@@ -6,38 +6,29 @@
                 <div class="server-list">
                     <div v-for="server in servers" :key="server.ip" class="server">
                         <p>{{ server.name }}</p>
-                        <p>{{ server.ip }}</p>
+                        <p>{{ server.host }}</p>
                     </div>
                 </div>
-                <div class="button" v-on:click="importServer">
-                    Import From Stereum
-                </div>
+                <div class="button" @click="importServer">Import From Stereum</div>
             </div>
-            <div class="ssh-form">
-            </div>
+            <div class="ssh-form"></div>
         </div>
     </div>
 </template>
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 const servers = ref([])
 
-function importServer() {console.log('importing server')}
+async function importServer() {
+    servers.value = await window.api.invoke('import-server-from-stereum');
+}
 
-servers.value.push({name: 'Server1', ip: '192.168.1.1',})
-servers.value.push({name: 'Server2', ip: '192.168.1.2',})
-servers.value.push({name: 'Server3', ip: '192.168.1.3',})
-servers.value.push({name: 'Server4', ip: '192.168.1.4',})
-servers.value.push({name: 'Server5', ip: '192.168.1.5',})
-servers.value.push({name: 'Server6', ip: '192.168.1.6',})
-servers.value.push({name: 'Server7', ip: '192.168.1.7',})
-servers.value.push({name: 'Server1', ip: '192.168.1.1',})
-servers.value.push({name: 'Server2', ip: '192.168.1.2',})
-servers.value.push({name: 'Server3', ip: '192.168.1.3',})
-servers.value.push({name: 'Server4', ip: '192.168.1.4',})
-servers.value.push({name: 'Server5', ip: '192.168.1.5',})
-servers.value.push({name: 'Server6', ip: '192.168.1.6',})
-servers.value.push({name: 'Server7', ip: '192.168.1.7',})
+onMounted(() => {
+    console.log('SSHLogin.vue mounted')
+    window.api.invoke('store-get', 'server').then((data) => {
+        servers.value = data
+    })
+})
 </script>
 <style scoped>
 .server-manager {
@@ -49,7 +40,7 @@ servers.value.push({name: 'Server7', ip: '192.168.1.7',})
     padding: 10px;
 }
 .button {
-    background-color: #A1A6B4;
+    background-color: #a1a6b4;
     border-radius: 5px;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
     color: black;
@@ -60,10 +51,10 @@ servers.value.push({name: 'Server7', ip: '192.168.1.7',})
 .server p {
     margin: 0;
 }
-.server{
+.server {
     display: flex;
     flex-direction: column;
-    background-color: #B4D2E7;
+    background-color: #b4d2e7;
     border-radius: 5px;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
     color: black;
@@ -74,7 +65,7 @@ servers.value.push({name: 'Server7', ip: '192.168.1.7',})
     display: flex;
     height: 100%;
     width: 100%;
-    background-color: #A1A6B4;
+    background-color: #a1a6b4;
     border-radius: 5px;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
 }
@@ -83,7 +74,7 @@ servers.value.push({name: 'Server7', ip: '192.168.1.7',})
     flex-direction: column;
     height: 100%;
     width: 100%;
-    background-color: #A1A6B4;
+    background-color: #a1a6b4;
     overflow-y: auto;
     max-height: 100%;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
@@ -97,21 +88,21 @@ servers.value.push({name: 'Server7', ip: '192.168.1.7',})
     width: 100%;
     gap: 20px;
     box-sizing: border-box;
-    flex-grow: 1
+    flex-grow: 1;
 }
 .login-container {
     display: flex;
     flex-direction: column;
     width: 90vw;
     height: 90vh;
-    background-color: #3D4250;
+    background-color: #3d4250;
     border-color: black;
     border-radius: 5px;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
     padding: 20px;
 }
 .login-container h1 {
-    color: #A1A6B4;
+    color: #a1a6b4;
     text-align: left;
     margin: 0;
 }
