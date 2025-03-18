@@ -1,11 +1,16 @@
 <template>
     <div class="base-container">
-        <SSHLogin />
+        <NodeManager v-if="nodeManagerActive" @add-connection="nodeManagerActive = false" />
+        <SSHLogin v-else @login="nodeManagerActive = true"/>
     </div>
 </template>
 <script setup>
-import SSHLogin from './components/SSHLogin.vue'
-import { onMounted } from 'vue'
+
+import { onMounted, ref } from 'vue'
+import SSHLogin from './components/ssh/SSHLogin.vue'
+import NodeManager from './components/nodes/NodeManager.vue'
+
+const nodeManagerActive = ref(true)
 
 onMounted(() => {
     console.log('App.vue mounted')
@@ -22,6 +27,7 @@ onMounted(() => {
     width: 100vw;
     background-color: #30343f;
     font-family: 'Courier New', Courier, monospace;
-    color: #a1a6b4;
+    color: black;
+    gap: 20px;
 }
 </style>
