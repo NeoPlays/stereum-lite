@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-const validChannels = ['ping', 'import-server-from-stereum', 'store-get', 'store-set', 'ssh-login'];
+const validChannels = ['ping', 'import-server-from-stereum', 'store-get', 'store-set', 'ssh-login', 'get-all-nodes'];
 
 contextBridge.exposeInMainWorld(
     "api", {

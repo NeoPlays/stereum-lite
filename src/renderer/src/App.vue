@@ -1,7 +1,7 @@
 <template>
     <div class="base-container">
-        <NodeManager v-if="nodeManagerActive" @add-connection="nodeManagerActive = false" />
-        <SSHLogin v-else @login="nodeManagerActive = true"/>
+        <NodeManager v-if="nodeManagerActive" @add-connection="handleAddConnection" />
+        <SSHLogin v-else @login="handleLogin"/>
     </div>
 </template>
 <script setup>
@@ -16,6 +16,16 @@ onMounted(() => {
     console.log('App.vue mounted')
     window.api.invoke('ping')
 })
+
+function handleLogin(data) {
+    nodeManagerActive.value = true
+    console.log('Login successful', data)
+}
+
+function handleAddConnection() {
+    nodeManagerActive.value = false
+    console.log('Node Manager closed')
+}
 </script>
 <style scoped>
 /*https://coolors.co/94c5cc-b4d2e7-a1a6b4-30343f-3d4250*/

@@ -38,13 +38,28 @@ export class SSHService {
         this.SSHParams = SSHParams
     }
 
-    connect() {
-        const conn = new Client()
-        const params = this.SSHParams.getConnectionParams()
-        conn.connect(params)
-        conn.on('ready', () => {
-            log.info('Client :: ready')
-            this.connections.push(new SSHConnection(conn))
+    async connect() {
+        return new Promise((resolve, reject) => {
+            const conn = new Client()
+            const params = this.SSHParams.getConnectionParams()
+            conn.connect(params)
+            conn.on('ready', () => {
+                log.info('Client :: ready')
+                this.connections.push(new SSHConnection(conn))
+                resolve({code: 0, message: 'SSH connection established'})
+            })
+            conn.on('error', (err) => {
+                log.error('Client :: error ::', err)
+                reject({code: 1, message: 'SSH connection error', error: err})
+            })
+            conn.on('end', () => {
+                log.info('Client :: end')
+                this.connections = this.connections.filter(c => c.conn !== conn)
+            })
+            conn.on('close', () => {
+                log.info('Client :: close')
+                this.connections = this.connections.filter(c => c.conn !== conn)
+            })
         })
     }
 
