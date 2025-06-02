@@ -1,6 +1,6 @@
 <template>
     <div class="ssh-server-list">
-        <div class="ssh-server" v-for="server in servers" :key="server.name" @click="$emit('selectServer', server)">
+        <div class="ssh-server" v-for="server in server" :key="server.name" @click="$emit('selectServer', server)">
             <span class="ssh-server-name">{{ server.name }}</span>
             <span class="ssh-server-host">{{ server.host }}</span>
         </div> 
@@ -8,21 +8,25 @@
 </template>
 <script setup>
 import { onMounted, ref} from 'vue'
+import { storeToRefs } from 'pinia'
+import { useServerStore } from '@stores/useServer';
 
+const store = useServerStore()
 
-const servers = ref([])
+const { server } = storeToRefs(store)
+const { getServer, setServer } = store
 
 async function importServer() {
-    servers.value = await window.api.invoke('import-server-from-stereum');
+    await setServer(await window.api.invoke('import-server-from-stereum'))
 }
 
-async function loadServers() {
-    servers.value = await window.api.invoke('store-get', 'server');
+async function loadserver() {
+    await getServer()
 }
 
 onMounted(() => {
     console.log('SSHServerList.vue mounted')
-    loadServers()
+    loadserver()
 })
 </script>
 <style scoped>

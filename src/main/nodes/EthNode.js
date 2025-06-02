@@ -6,7 +6,7 @@ export class EthNode {
     }
     toDTO(){
         return {
-            name: "Test",
+            name: this.sshService.SSHParams.name,
             host: this.sshService.SSHParams.host,
         }
     }

@@ -45,6 +45,13 @@
 import { onMounted, ref, defineEmits } from 'vue'
 import SSHServerList from './SSHServerList.vue'
 import _ from 'lodash'
+import { storeToRefs } from 'pinia'
+import { useServerStore } from '@stores/useServer';
+
+const store = useServerStore()
+
+const { server } = storeToRefs(store)
+const { getServer , setServer } = store
 
 const emit = defineEmits(['login'])
 
@@ -64,11 +71,8 @@ async function login() {
 }
 
 async function save() {
-    // not optimal, but it works
-    // TODO: refactor to use a store
-    const servers = await window.api.invoke('store-get', 'server')
-    servers[servers.findIndex(server => server.host === credentials.value.host)] = copyCredentials(credentials.value)
-    await window.api.invoke('store-set', 'server', _.cloneDeep(servers))
+    server.value[server.value.findIndex(s => s.name === credentials.value.name)] = copyCredentials(credentials.value)
+    await setServer(_.cloneDeep(server.value))
 }
 
 function selectServer(server) {
