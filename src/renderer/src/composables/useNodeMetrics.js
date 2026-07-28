@@ -27,6 +27,11 @@ export function useNodeMetrics(nodeId, { intervalMs = 5000, diskIntervalMs = 300
     let systemInFlight = false
     let clientsInFlight = false
     let diskInFlight = false
+    // serviceId → consecutive polls whose probe answered but carried no peer count.
+    // A single timed-out peer curl (while Prometheus still supplies sync) must not
+    // blank the peer bar for one tick - carry the last known count for a few polls.
+    const PEER_MISS_LIMIT = 3
+    let peerMisses = {}
 
     const id = () => (typeof nodeId === 'function' ? nodeId() : unref(nodeId))
 
@@ -48,7 +53,14 @@ export function useNodeMetrics(nodeId, { intervalMs = 5000, diskIntervalMs = 300
         if (clientsInFlight) return
         clientsInFlight = true
         try {
-            clients.value = await window.api.invoke('get-client-metrics', id())
+            const fresh = await window.api.invoke('get-client-metrics', id())
+            for (const [sid, m] of Object.entries(fresh)) {
+                if (m.error || m.peers != null) { peerMisses[sid] = 0; continue }
+                const prev = clients.value[sid]
+                peerMisses[sid] = (peerMisses[sid] || 0) + 1
+                if (prev?.peers != null && peerMisses[sid] <= PEER_MISS_LIMIT) m.peers = prev.peers
+            }
+            clients.value = fresh
             clientsError.value = null
         } catch (e) {
             clientsError.value = e?.message || String(e)
@@ -78,6 +90,7 @@ export function useNodeMetrics(nodeId, { intervalMs = 5000, diskIntervalMs = 300
 
     function start() {
         stop()
+        peerMisses = {}
         refresh()
         timer = setInterval(() => { if (shouldPoll()) { refreshSystem(); refreshClients() } }, intervalMs)
         diskTimer = setInterval(() => { if (shouldPoll()) refreshDisk() }, diskIntervalMs)

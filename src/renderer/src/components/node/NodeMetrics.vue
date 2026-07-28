@@ -90,24 +90,30 @@
                             <span class="client-sync" :class="syncClass(service.metric)">{{ syncLabel(service.metric) }}</span>
                         </div>
 
+                        <!-- Both metrics render unconditionally - a missing value shows an
+                             empty track and a "-" readout instead of removing the row, so
+                             the layout never jumps when a single probe misses a poll. -->
                         <div class="client-metrics">
-                            <div class="client-metric" v-if="service.metric.syncPct != null || service.metric.syncing">
+                            <div class="client-metric">
                                 <span class="metric-tag">sync</span>
                                 <div class="bar">
                                     <div v-if="service.metric.syncPct != null" class="bar-fill" :class="syncBarLevel(service.metric)" :style="pctFill(service.metric.syncPct)"></div>
                                     <!-- syncing but no computable %: show an indeterminate sweep -->
-                                    <div v-else class="bar-fill indeterminate" :class="syncBarLevel(service.metric)"></div>
+                                    <div v-else-if="service.metric.syncing" class="bar-fill indeterminate" :class="syncBarLevel(service.metric)"></div>
                                 </div>
-                                <span class="metric-val mono">{{ headLabel(service.metric) || 'syncing…' }}</span>
+                                <span class="metric-val mono">{{ headLabel(service.metric) || (service.metric.syncing ? 'syncing…' : '-') }}</span>
                             </div>
 
-                            <div class="client-metric" v-if="service.metric.peers != null">
+                            <div class="client-metric">
                                 <span class="metric-tag">peers</span>
-                                <div class="bar" v-if="service.metric.maxPeers">
-                                    <div class="bar-fill" :class="peerLevel(service.metric)" :style="peerFill(service.metric)"></div>
+                                <div class="bar">
+                                    <div v-if="service.metric.peers != null && service.metric.maxPeers" class="bar-fill" :class="peerLevel(service.metric)" :style="peerFill(service.metric)"></div>
                                 </div>
                                 <span class="metric-val mono">
-                                    {{ service.metric.peers }}<template v-if="service.metric.maxPeers"> / {{ service.metric.maxPeers }}</template>
+                                    <template v-if="service.metric.peers != null">
+                                        {{ service.metric.peers }}<template v-if="service.metric.maxPeers"> / {{ service.metric.maxPeers }}</template>
+                                    </template>
+                                    <template v-else>-</template>
                                 </span>
                             </div>
                         </div>

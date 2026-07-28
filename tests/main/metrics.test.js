@@ -82,6 +82,13 @@ describe('buildClientProbeScript', () => {
         expect(script).toContain('eth_blockNumber')
     })
 
+    it('gives each JSON-RPC request a distinct id so responses can be matched back', () => {
+        const script = buildClientProbeScript([geth])
+        expect(script).toContain('"method":"eth_syncing","params":[],"id":1')
+        expect(script).toContain('"method":"net_peerCount","params":[],"id":2')
+        expect(script).toContain('"method":"eth_blockNumber","params":[],"id":3')
+    })
+
     it('emits beacon REST probes for a consensus client', () => {
         const script = buildClientProbeScript([lh])
         expect(script).toContain(`http://stereum-${lh.id}:5052/eth/v1/node/syncing`)
@@ -132,9 +139,9 @@ describe('parseClientMetrics', () => {
             `===${geth.id}===`,
             '{"jsonrpc":"2.0","id":1,"result":false}',
             '',
-            '{"jsonrpc":"2.0","id":1,"result":"0x2a"}',
+            '{"jsonrpc":"2.0","id":2,"result":"0x2a"}',
             '',
-            '{"jsonrpc":"2.0","id":1,"result":"0x14f6a1"}', // 1373857
+            '{"jsonrpc":"2.0","id":3,"result":"0x14f6a1"}', // 1373857
         ].join('\n')
         const r = parseClientMetrics(out, [geth])[geth.id]
         expect(r).toMatchObject({ role: 'execution', syncing: false, syncPct: 100, peers: 42, head: 1373857 })
@@ -143,16 +150,16 @@ describe('parseClientMetrics', () => {
     it('parses a syncing execution client with a progress percentage', () => {
         const out = [
             `===${geth.id}===`,
-            '{"result":{"currentBlock":"0x32","highestBlock":"0x64"}}', // 50 / 100
+            '{"id":1,"result":{"currentBlock":"0x32","highestBlock":"0x64"}}', // 50 / 100
             '',
-            '{"result":"0x5"}',
+            '{"id":2,"result":"0x5"}',
         ].join('\n')
         const r = parseClientMetrics(out, [geth])[geth.id]
         expect(r).toMatchObject({ syncing: true, syncPct: 50, head: 50, target: 100, peers: 5 })
     })
 
     it('a synced execution client uses its own head as target (renders block x / x)', () => {
-        const out = `===${geth.id}===\n{"result":false}\n\n{"result":"0xa"}\n\n{"result":"0x14f6a1"}`
+        const out = `===${geth.id}===\n{"id":1,"result":false}\n\n{"id":2,"result":"0xa"}\n\n{"id":3,"result":"0x14f6a1"}`
         const r = parseClientMetrics(out, [geth])[geth.id]
         expect(r.syncing).toBe(false)
         expect(r.head).toBe(1373857)
@@ -172,7 +179,7 @@ describe('parseClientMetrics', () => {
     })
 
     it('includes maxPeers from the client default when the config sets no flag', () => {
-        const out = `===${geth.id}===\n{"result":false}\n\n{"result":"0xa"}\n`
+        const out = `===${geth.id}===\n{"id":1,"result":false}\n\n{"id":2,"result":"0xa"}\n`
         const r = parseClientMetrics(out, [geth])[geth.id]
         expect(r.maxPeers).toBe(50) // geth default
         expect(r.peers).toBe(10)
@@ -231,6 +238,44 @@ describe('parseClientMetrics', () => {
         ].join('\n')
         const r = parseClientMetrics(out, [lh])[lh.id]
         expect(r).toMatchObject({ source: 'beacon-api', syncPct: 95, peers: 64 })
+    })
+
+    // A timed-out curl emits nothing, so its JSON is simply absent from the block.
+    // Responses must be matched by request id (EL) / shape (CL), never by position -
+    // positional parsing read the next response in the missing one's place, which
+    // blanked the peer bar (and could misreport sync) for that poll.
+    it('a missing net_peerCount response leaves peers null without shifting eth_blockNumber into its place', () => {
+        const out = `===${geth.id}===\n{"id":1,"result":false}\n\n{"id":3,"result":"0x14f6a1"}`
+        const r = parseClientMetrics(out, [geth])[geth.id]
+        expect(r).toMatchObject({ syncing: false, head: 1373857, peers: null })
+    })
+
+    it('a missing beacon syncing response keeps the peer count (Prometheus still supplies sync)', () => {
+        const out = [
+            `===${lh.id}===`,
+            '{"data":{"connected":"64"}}', // only the peer_count curl answered
+            '',
+            '===__prom__===',
+            promBlock(1980, 2000, `stereum-${lh.id}:5054`),
+            '',
+        ].join('\n')
+        const r = parseClientMetrics(out, [lh])[lh.id]
+        expect(r).toMatchObject({ source: 'prometheus', syncPct: 99, peers: 64 })
+        expect(r.error).toBeUndefined()
+    })
+
+    it('a missing beacon syncing response without Prometheus still reports peers (sync unknown)', () => {
+        const out = `===${lh.id}===\n{"data":{"connected":"64"}}\n`
+        const r = parseClientMetrics(out, [lh])[lh.id]
+        expect(r).toMatchObject({ source: 'beacon-api', peers: 64 })
+        expect(r.syncing).toBeUndefined()
+        expect(r.error).toBeUndefined()
+    })
+
+    it('a missing beacon peer_count response keeps sync intact with peers null', () => {
+        const out = `===${lh.id}===\n{"data":{"head_slot":"1900","sync_distance":"0","is_syncing":false}}\n`
+        const r = parseClientMetrics(out, [lh])[lh.id]
+        expect(r).toMatchObject({ syncing: false, syncPct: 100, peers: null })
     })
 
     it('marks a client that returned nothing as errored rather than dropping it', () => {

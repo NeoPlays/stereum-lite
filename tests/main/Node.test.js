@@ -622,7 +622,7 @@ describe('Node', () => {
         it('probes running clients via a docker curl sidecar on the stereum network (with sudo)', async () => {
             node.sshService.exec
                 .mockResolvedValueOnce(ok(`{"Names":"stereum-${gethId}","State":"running","Status":"Up","Image":"geth"}`)) // fetchContainerStatuses
-                .mockResolvedValueOnce(ok(`===${gethId}===\n{"result":false}\n\n{"result":"0x2a"}\n`)) // docker run probe
+                .mockResolvedValueOnce(ok(`===${gethId}===\n{"id":1,"result":false}\n\n{"id":2,"result":"0x2a"}\n`)) // docker run probe
             const r = await node.fetchClientMetrics()
             const [cmd, useSudo] = node.sshService.exec.mock.calls[1]
             expect(cmd).toContain('docker run --rm --network stereum')

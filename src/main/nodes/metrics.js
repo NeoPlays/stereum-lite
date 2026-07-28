@@ -256,6 +256,11 @@ export const PROMETHEUS_PORT = 9090
 // Marker for the Prometheus response block in the sidecar output (not a service id).
 const PROM_KEY = '__prom__'
 
+// JSON-RPC request ids for the execution-client probe - parseJsonRpc matches
+// responses by id rather than position (a failed curl emits nothing, which would
+// otherwise shift every later response one slot up).
+const RPC_IDS = { syncing: 1, peers: 2, block: 3 }
+
 /** Container name for a service id (hyphen - matches stereum's convention). */
 const containerName = (id) => `stereum-${id}`
 /** Per-service delimiter emitted by the probe script so responses can be split back apart. */
@@ -285,16 +290,18 @@ export function buildClientProbeScript(services = [], { promHost = null } = {}) 
         const host = `${containerName(svc.id)}:${reg.port}`
         blocks.push(`echo '${marker(svc.id)}'`)
         if (reg.api === 'jsonrpc') {
-            const rpc = (method) =>
+            // Distinct request ids (RPC_IDS) - responses are matched back by id, so a
+            // single timed-out curl drops its own value instead of shifting the rest.
+            const rpc = (method, reqId) =>
                 `curl -s -m 3 -X POST -H 'content-type: application/json' ` +
-                `-d '{"jsonrpc":"2.0","method":"${method}","params":[],"id":1}' http://${host}`
-            blocks.push(rpc('eth_syncing'))
+                `-d '{"jsonrpc":"2.0","method":"${method}","params":[],"id":${reqId}}' http://${host}`
+            blocks.push(rpc('eth_syncing', RPC_IDS.syncing))
             blocks.push("echo ''")
-            blocks.push(rpc('net_peerCount'))
+            blocks.push(rpc('net_peerCount', RPC_IDS.peers))
             blocks.push("echo ''")
             // eth_blockNumber gives the head block even when synced (eth_syncing=false
             // reports no block number), so the sync bar always has a value to show.
-            blocks.push(rpc('eth_blockNumber'))
+            blocks.push(rpc('eth_blockNumber', RPC_IDS.block))
         } else {
             blocks.push(`curl -s -m 3 http://${host}/eth/v1/node/syncing`)
             blocks.push("echo ''")
@@ -435,7 +442,11 @@ function findFlagValue(command, flags) {
     return null
 }
 
-function parseJsonRpc([syncingRes, peerRes, blockRes]) {
+function parseJsonRpc(jsons) {
+    const byId = (reqId) => jsons.find((j) => j?.id === reqId)
+    const syncingRes = byId(RPC_IDS.syncing)
+    const peerRes = byId(RPC_IDS.peers)
+    const blockRes = byId(RPC_IDS.block)
     if (!syncingRes) throw new Error('no eth_syncing response')
     const sync = syncingRes.result
     // false => fully synced; object => syncing with currentBlock/highestBlock (hex).
@@ -459,9 +470,20 @@ function parseJsonRpc([syncingRes, peerRes, blockRes]) {
     return { syncing, syncPct, head, target, peers }
 }
 
-function parseBeacon([syncingRes, peerRes]) {
+function parseBeacon(jsons) {
+    // Match responses by shape, not position - if the syncing curl times out, the
+    // peer_count response would otherwise be read as the sync response (and vice
+    // versa peers would silently go null, blanking the peer bar for a poll).
+    const syncingRes = jsons.find((j) => j?.data && j.data.is_syncing !== undefined)
+    const peerRes = jsons.find((j) => j?.data && j.data.connected !== undefined)
     const d = syncingRes?.data
-    if (!d) throw new Error('no beacon syncing response')
+    if (!d) {
+        const peersOnly = toNum(peerRes?.data?.connected)
+        if (peersOnly == null) throw new Error('no beacon syncing response')
+        // Syncing curl failed but peers made it - keep them (Prometheus usually still
+        // supplies sync; without it the row shows peers with an "unknown" sync pill).
+        return { peers: peersOnly }
+    }
     const syncing = d.is_syncing === true
     const head = toNum(d.head_slot)
     const distance = toNum(d.sync_distance)
