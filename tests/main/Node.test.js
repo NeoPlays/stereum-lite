@@ -428,7 +428,7 @@ describe('Node', () => {
             const cmd = node.sshService.exec.mock.calls[0][0]
             const folder = cmd.match(/ANSIBLE_LOG_FOLDER=(\S+)/)[1]
             expect(folder).toMatch(/^\/tmp\/stereum-lite-/)
-            // second exec reads the folder's files and removes it (under one sudo via sh -c)
+            // log read + cleanup run in one sudo sh -c
             const readCmd = node.sshService.exec.mock.calls[1][0]
             expect(readCmd).toContain(`cat ${folder}/*`)
             expect(readCmd).toContain(`rm -rf ${folder}`)
@@ -596,7 +596,7 @@ describe('Node', () => {
             node.sshService.exec.mockResolvedValueOnce(ok('#cores\n4\n'))
             await node.fetchSystemMetrics()
             const [cmd, useSudo] = node.sshService.exec.mock.calls[0]
-            // Regression: wrapping in `sh -c '…'` breaks - the command has literal single quotes.
+            // sh -c wrapping breaks - the command contains literal single quotes.
             expect(cmd.startsWith('sh -c')).toBe(false)
             expect(cmd).toContain('/proc/stat')
             expect(cmd).toContain('/proc/meminfo')
@@ -718,7 +718,6 @@ describe('Node', () => {
             await node.updateOS()
             const cmd = node.sshService.exec.mock.calls[0][0]
             expect(cmd).toContain('"stereum_role":"update-os"')
-            // No stereum extras for OS update
             expect(cmd).not.toContain('"stereum":')
         })
 

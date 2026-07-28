@@ -1,10 +1,5 @@
-// Client-type categorization for stereum services, mirrored from the launcher's
-// authoritative map (`launcher/src/store/services.js`). stereum's four categories are
-// execution / consensus / validator / service; we surface them as EC / CC / VC / Other.
-//
-// Non-obvious cases worth knowing: Obol Charon (DVT), SSVNetwork and Web3Signer are
-// validator-category middleware; the SSV DKG/NOM helpers, the validator ejector, keys-api,
-// mev-boost and the monitoring stack are all "other". Unknown/custom types fall back to other.
+// Client-type categorization mirrored from the launcher's authoritative map (`launcher/src/store/services.js`).
+// Gotchas: Charon (DVT), SSVNetwork and Web3Signer are validator-category middleware; mev-boost, ejector, keys-api and monitoring are "other"; unknown types fall back to other.
 
 // Category keys in stack order (how an operator reads a setup top to bottom).
 export const CATEGORY_ORDER = ['execution', 'consensus', 'validator', 'other']
@@ -30,8 +25,7 @@ export const SERVICE_CATEGORY = {
     // everything else (mev-boost, monitoring, ejector, keys-api, ssv dkg/nom, ipfs, ...) -> other
 }
 
-// Category hue (validated --chart palette). Single source shared by every tab's rails,
-// header dots and dependency chips.
+// Category hue (validated --chart palette); single source for every tab's rails, header dots and dependency chips.
 export const CATEGORY_COLOR = {
     execution: 'var(--chart-1)', // blue
     consensus: 'var(--chart-4)', // violet
@@ -58,11 +52,8 @@ function categorize(services) {
 }
 
 /**
- * Group services by their setup (from multisetup.yaml), then by client-type category.
- * Real setups first (by name), the node-wide `common` group last, and anything without a
- * setup (older single-setup nodes) in a trailing headerless group. Each service must carry
- * the DTO's `setup` annotation and `config.service`. Shared by the Services/Metrics/Updates
- * tabs via <SetupGroups>.
+ * Group services by setup (multisetup.yaml), then by category: real setups first (by name),
+ * `common` last, setup-less services in a trailing headerless group; services must carry `setup` + `config.service`.
  * @returns {{ key:string, setup:object|null, categories:{ key, label, services }[] }[]}
  */
 export function groupServices(services = []) {

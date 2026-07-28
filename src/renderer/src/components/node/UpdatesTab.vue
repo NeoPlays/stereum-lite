@@ -165,8 +165,7 @@ const upgradableServices = computed(() =>
     (props.nodeData?.services ?? []).filter(s => serviceUpdate(s).upgradable)
 )
 
-// Short, human-readable service name: drop the role/suffix noise from the type name
-// (e.g. "LighthouseBeaconService" → "Lighthouse", "GethService" → "Geth").
+// Drop role/suffix noise from the type name ("LighthouseBeaconService" → "Lighthouse").
 function shortServiceName(service) {
     return (service.config?.service ?? service.id).replace(/Beacon|Service|Validator/g, '').trim()
 }
@@ -255,15 +254,13 @@ function flashHost(kind, text) {
     setTimeout(() => { if (hostMessage.value?.text === text) hostMessage.value = null }, 5000)
 }
 
-// After an update, have the parent reload the node; the watch below re-fetches our
-// updates-specific data (packages / controls commit) when nodeData changes.
+// Parent reload triggers the nodeData watch, which re-fetches our host/controls data.
 function refreshAfterUpdate() {
     emit('refresh')
 }
 
-// Fire a node op as a background task, wait for it to finish (observed via the task
-// registry), then refresh. Returns the terminal task so callers can flash by status.
-// Errors surface as task.status === 'failed' + task.error - they're not thrown.
+// Fire a node op as a background task, await it via the task registry, then refresh.
+// Errors surface as task.status === 'failed' + task.error - never thrown.
 async function runTask(action, args, { onDone } = {}) {
     const taskId = await tasks.runNodeTask(route.params.id, action, args)
     const task = await tasks.awaitTask(taskId)
@@ -352,8 +349,7 @@ onMounted(() => {
     loadHostData()
 })
 
-// When the parent reloads the node (its own Refresh or after one of our updates),
-// re-fetch the host/controls data so it reflects the new state.
+// Re-fetch host/controls data whenever the parent reloads the node.
 watch(() => props.nodeData, () => loadHostData())
 </script>
 

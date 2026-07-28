@@ -11,8 +11,7 @@ import YAML from 'yaml';
 import { randomUUID } from "crypto";
 import log from 'electron-log';
 
-// How often a running playbook's log file is re-read to stream live sub-tasks to the
-// task panel (only when running inside a task context).
+// Interval for re-reading a running playbook's log to stream live sub-tasks (task context only).
 const PLAYBOOK_POLL_MS = 2000;
 
 /**
@@ -49,8 +48,7 @@ export class Node {
     }
 
     /**
-     * Convert the node to a Data Transfer Object (DTO) for listing purposes
-     * @returns A lightweight representation of the node for listing purposes
+     * @returns lightweight list DTO (no SSH calls)
      */
     toListDTO(){
         return {
@@ -94,12 +92,8 @@ export class Node {
     }
 
     /**
-     * Read the multi-setup grouping from `/etc/stereum/multisetup.yaml` (same dir as
-     * stereum.yaml and services/, NOT under controls_install_path). The file is a map
-     * keyed by setup id; each entry has name/network/color/type and a list of member
-     * service ids. The `common` type holds node-wide services (prometheus, grafana,
-     * node exporter, ...); every other entry is a setup with its own network.
-     * Absent on single-setup / older nodes - logged as a warning, treated as no setups.
+     * Read `/etc/stereum/multisetup.yaml` (NOT under controls_install_path): map keyed by setup id;
+     * type `common` = node-wide services. Absent on single-setup/older nodes - treated as no setups.
      * @returns {Promise<{ id, name, network, color, type, services: string[] }[]>}
      */
     async fetchSetups(refresh = false) {
@@ -128,8 +122,8 @@ export class Node {
     }
 
     /**
-     * Fetch the settings for the node
-     * @param {Boolean} refresh - whether to force refresh the settings from the node (default: false)
+     * Fetch the node settings
+     * @param {Boolean} refresh - force re-fetch
      * @returns parsed settings object
      */
     async fetchSettings(refresh = false) {
@@ -141,8 +135,8 @@ export class Node {
         return this.settings;
     }
     /**
-     * Fetch the services for the node
-     * @param {Boolean} refresh - whether to force refresh the services from the node (default: false)
+     * Fetch the node's services
+     * @param {Boolean} refresh - force re-fetch
      * @returns parsed services object
      */
     async fetchServices(refresh = false) {
@@ -201,17 +195,14 @@ export class Node {
     }
 
     /**
-     * Find the service config files under /etc/stereum/services that were modified
-     * within the last `timeScopeSeconds` seconds and return their service ids
-     * (the filename stem is the UUID - same convention as fetchServices).
-     * Mirrors the selection logic of the upstream `restart-services` Ansible role.
+     * Ids of services whose config changed in the last `timeScopeSeconds` (mirrors the upstream `restart-services` role's selection).
      * @param {number} timeScopeSeconds
      * @returns {Promise<string[]>} ids of changed services
      */
     async findChangedServiceIds(timeScopeSeconds) {
         const scope = Math.floor(Number(timeScopeSeconds))
         if (!Number.isFinite(scope) || scope <= 0) throw new Error('timeScopeSeconds must be a positive number')
-        // GNU find on the remote: files newer than (now - scope). "-printf '%f'" yields the bare filename.
+        // Requires GNU find (-newermt, -printf).
         const cmd = `find /etc/stereum/services -maxdepth 1 -type f -name '*.yaml' -newermt "${scope} seconds ago" -printf '%f\\n'`
         const response = await this.sshService.exec(cmd)
         if (response.rc !== 0 && response.rc !== null) throw new Error(response.stderr || 'findChangedServiceIds failed')
@@ -223,11 +214,9 @@ export class Node {
     }
 
     /**
-     * Restart every service whose config changed within the last `timeScopeSeconds`
-     * seconds. Same behaviour as the upstream `restart-services` role, but the
-     * restarts run in parallel instead of one after another.
+     * Restart services changed within the window - the upstream `restart-services` role, but parallel.
      * @param {number} timeScopeSeconds - lookback window in seconds
-     * @param {{ prune?: boolean }} [opts] - run a `docker system prune` afterwards (default true, mirrors the role)
+     * @param {{ prune?: boolean }} [opts] - docker prune afterwards (default true, mirrors the role)
      * @returns {Promise<{ serviceId: string, ok: boolean, error?: string }[]>} per-service outcome
      */
     async restartChangedServices(timeScopeSeconds, { prune = true } = {}) {
@@ -246,10 +235,7 @@ export class Node {
         return results
     }
 
-    /**
-     * Mirror the role's final `docker_prune`: remove all unused containers, images
-     * (not just dangling), networks, volumes, and build cache.
-     */
+    /** Mirror the role's final `docker_prune` (all unused images, not just dangling). */
     async pruneDocker() {
         const response = await this.sshService.exec('docker system prune -af --volumes', true, {
             timeoutMs: SSHService.PLAYBOOK_TIMEOUT_MS,
@@ -283,13 +269,10 @@ export class Node {
     }
 
     /**
-     * The host's OS distro + version as a display string, e.g. "Ubuntu 22.04.3 LTS".
-     * Reads `PRETTY_NAME` from `/etc/os-release` (present on all systemd distros); falls
-     * back to `NAME`+`VERSION` fields if it's missing.
+     * OS distro + version string (e.g. "Ubuntu 22.04.3 LTS") from `/etc/os-release` PRETTY_NAME, NAME+VERSION fallback.
      */
     async fetchOsInfo() {
-        // No sudo: /etc/os-release is world-readable, and `. ` is a shell builtin that
-        // `sudo` can't invoke (it would exit non-zero). ssh runs this through the login shell.
+        // No sudo: os-release is world-readable and `.` is a shell builtin sudo can't invoke.
         const response = await this.sshService.exec(
             '. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-$NAME $VERSION}"',
             false
@@ -301,34 +284,27 @@ export class Node {
     }
 
     /**
-     * Host system metrics (CPU / memory / disk) in a single SSH exec. Read-only,
-     * cheap - safe to poll while the node view is mounted. See `metrics.js`.
+     * Host system metrics in a single cheap SSH exec - safe to poll. See `metrics.js`.
      */
     async fetchSystemMetrics() {
-        // Passed straight to the remote shell (like the other compound commands here) -
-        // do NOT wrap in `sh -c '…'`: the command already contains single quotes.
+        // Do NOT wrap in `sh -c '...'` - the command contains single quotes.
         const response = await this.sshService.exec(SYSTEM_METRICS_CMD, false)
         if (response.rc !== 0 && response.rc !== null) throw new Error(response.stderr || 'fetchSystemMetrics failed')
         return parseSystemMetrics(response.stdout)
     }
 
     /**
-     * Per-client sync/peer health for every running execution/consensus client.
-     * Probes them all in one `docker run` curl sidecar joined to the stereum docker
-     * network (`STEREUM_DOCKER_NETWORK`), reaching each client by container name at
-     * its internal API port - no host port publishing required. Returns a map keyed
-     * by service id; a client that didn't answer carries an `error` instead of dropping.
+     * Sync/peer health for all running EL/CL clients via one curl sidecar on the stereum
+     * network (internal API ports, no host publishing). Failed probes carry `error`, never dropped.
      * @returns {Promise<{ [serviceId:string]: object }>}
      */
     async fetchClientMetrics() {
-        // Service types are static for the node's lifetime - only (re)read configs when
-        // missing, not on every poll. Container state gates the probe, so that stays fresh.
+        // Configs are static - only (re)read when missing; container state stays fresh per poll.
         if (!this.services?.length) await this.fetchServices()
         if (this.services.some(s => !s.config)) await this.fetchServiceConfigs()
         const containerStatuses = await this.fetchContainerStatuses()
         const services = this.services.map(s => ({ ...s, container: containerStatuses[s.id] ?? null }))
-        // If Prometheus is running, prefer it for beacon sync (wall-clock target slot) -
-        // the sidecar queries it once; the beacon API stays the per-client fallback.
+        // Prefer Prometheus for beacon sync (wall-clock target slot); beacon API is the fallback.
         const prometheus = services.find(s => s.config?.service === PROMETHEUS_SERVICE && s.container?.state === 'running')
         const promHost = prometheus ? `stereum-${prometheus.id}:${PROMETHEUS_PORT}` : null
         const script = buildClientProbeScript(services, { promHost })
@@ -341,10 +317,8 @@ export class Node {
     }
 
     /**
-     * Per-service disk usage for a stacked disk bar. Sums `du` over each service's
-     * host volume paths and reports it against the filesystem holding the stereum data
-     * dir. Heavy (`du` walks the tree) - call on a slow cadence, not the health poll.
-     * Uses a generous idle timeout since a cold `du` on large chain data is slow.
+     * Per-service disk usage (`du` over host volume paths). Heavy - slow cadence only,
+     * generous timeout since a cold `du` on chain data is slow.
      */
     async fetchDiskBreakdown() {
         if (!this.settings) await this.fetchSettings()
@@ -379,9 +353,8 @@ export class Node {
     }
 
     /**
-     * Run the `update-services` role without restarting. A single id is forwarded as a
-     * bare string, multiple ids as an array (top-level `services_to_update`); no ids
-     * updates all services. Pure - the caller decides when to restart.
+     * `update-services` role, no restart. Top-level `services_to_update`: single id as a
+     * bare string, multiple as an array, none = all services.
      */
     async _runServicesUpdate(serviceIds = null) {
         const topLevel = serviceIds?.length
@@ -391,9 +364,7 @@ export class Node {
     }
 
     /**
-     * Update service images and restart every service whose config changed as a result,
-     * in parallel. Standalone entry point for the per-service / "update all" actions -
-     * without the restart the new image is pulled but the running container keeps the old one.
+     * Update service images + restart changed services (without the restart the running container keeps the old image).
      * @param {string[]|null} serviceIds - ids to update; all services when null/empty
      * @param {{ prune?: boolean }} [opts]
      * @returns {Promise<{ serviceId: string, ok: boolean, error?: string }[]>} restarted services
@@ -406,10 +377,7 @@ export class Node {
     }
 
     /**
-     * Run the stereum control-update playbooks without restarting anything:
-     * `update-stereum` (optionally pinned to a commit) followed by `update-changes`,
-     * which applies the config migrations the new controls ship. Pure - the caller
-     * decides when to restart the affected services.
+     * `update-stereum` then `update-changes` (config migrations), no restart - the caller restarts.
      * @param {string|null} commit - optional target commit (override_gitcommit); latest when null
      */
     async _runStereumUpdate(commit = null) {
@@ -418,10 +386,7 @@ export class Node {
     }
 
     /**
-     * Update the stereum controls and restart every service whose config changed as a
-     * result (e.g. by `update-changes`), in parallel. This is the standalone entry point
-     * the "Update Node Controls" action uses - without the restart, the config migrations
-     * `update-changes` applies would not take effect until the next manual restart.
+     * Update controls + restart changed services (without the restart, `update-changes` migrations wouldn't take effect).
      * @param {string|null} commit - optional target stereum commit
      * @param {{ prune?: boolean }} [opts]
      * @returns {Promise<{ serviceId: string, ok: boolean, error?: string }[]>} restarted services
@@ -439,10 +404,7 @@ export class Node {
     }
 
     /**
-     * Run the full update sequence (stereum controls + service images) and return how
-     * many seconds it took. Mirrors the launcher's NodeUpdates.runAllUpdates. No restart
-     * happens here - that's done once over the whole window by runFullUpdate, so the
-     * pure `_runStereumUpdate` is used to avoid restarting mid-sequence.
+     * Controls + image updates, no restart (runFullUpdate restarts once over the whole window). Mirrors the launcher's NodeUpdates.runAllUpdates.
      * @param {string|null} commit - optional target stereum commit
      * @returns {Promise<number>} elapsed seconds
      */
@@ -454,9 +416,7 @@ export class Node {
     }
 
     /**
-     * Full update cycle: run all updates, then restart every service whose config
-     * changed during the update window (plus a 10s buffer, matching the launcher's
-     * `restart_time_scope = seconds + 10`). Restarts run in parallel.
+     * Full update cycle, then restart services changed in the window + 10s (launcher's `restart_time_scope = seconds + 10`).
      * @param {string|null} commit - optional target stereum commit
      * @param {{ prune?: boolean }} [opts]
      * @returns {Promise<{ elapsed: number, restarted: { serviceId: string, ok: boolean, error?: string }[] }>}
@@ -467,11 +427,7 @@ export class Node {
         return { elapsed, restarted }
     }
 
-    /**
-     * Human label for a playbook run, used as the sub-task group heading in the task
-     * panel. `manage-service` reflects the requested state + short service id so parallel
-     * restarts are distinguishable; the rest map role → friendly name.
-     */
+    /** Sub-task group heading for a playbook run; state + short id keeps parallel restarts distinguishable. */
     _playbookLabel(role, stereumArgs = {}, topLevelVars = {}) {
         if (role === 'manage-service') {
             const svc = stereumArgs.manage_service || {}
@@ -498,15 +454,11 @@ export class Node {
         if (Object.keys(stereumArgs).length) payload.stereum_args = stereumArgs
         const vars = JSON.stringify(payload)
         const escaped = vars.replace(/'/g, `'"'"'`)
-        // The stereumjson callback writes its structured per-task records (the
-        // TASK:/ACTION:/CATEGORY: blocks) to a per-host file under ANSIBLE_LOG_FOLDER,
-        // NOT to stdout. Give each run its own folder so we can read that log back.
+        // stereumjson writes its per-task records to a file under ANSIBLE_LOG_FOLDER, NOT stdout - give each run its own folder.
         const logFolder = `/tmp/stereum-lite-${randomUUID()}`
         const command = `ANSIBLE_LOAD_CALLBACK_PLUGINS=1 ANSIBLE_STDOUT_CALLBACK=stereumjson ANSIBLE_DEPRECATION_WARNINGS=false ANSIBLE_LOG_FOLDER=${logFolder} ansible-playbook --connection=local --inventory 127.0.0.1, --extra-vars '${escaped}' ${controlsPath}/ansible/controls/genericPlaybook.yaml`
 
-        // If we're inside a task, stream sub-tasks live by re-reading the log folder while
-        // the playbook runs. Each runPlaybook claims its own segment so composite ops
-        // (multiple playbooks) accumulate in order.
+        // Inside a task: stream sub-tasks live; each runPlaybook claims its own segment so composite ops accumulate in order.
         const reporter = taskContext.getStore()
         const segment = reporter ? reporter.begin(this._playbookLabel(role, stereumArgs, topLevelVars)) : null
         const stop = reporter ? this._pollPlaybookLog(logFolder, segment, reporter) : null
@@ -518,9 +470,7 @@ export class Node {
             stop?.()
         }
 
-        // Final read of the structured log (best-effort) + cleanup. Done even on failure so
-        // the failed steps are captured. The folder is root-owned (ansible ran under sudo),
-        // so cat + rm run together under one sudo via `sh -c`.
+        // Final log read + cleanup, even on failure so failed steps are captured. Folder is root-owned, so cat + rm share one sudo.
         response.log = await this._readPlaybookLog(logFolder, { cleanup: true })
         if (reporter) reporter.report(segment, parseSubTasks(response.log))
 
@@ -534,10 +484,7 @@ export class Node {
         return response
     }
 
-    /**
-     * Poll a running playbook's log folder and stream parsed sub-tasks to the reporter's
-     * segment. Returns a stop() to cancel the loop (called once the exec resolves).
-     */
+    /** Poll a running playbook's log and stream parsed sub-tasks to the segment; returns stop(). */
     _pollPlaybookLog(logFolder, segment, reporter) {
         let active = true
         let timer = null

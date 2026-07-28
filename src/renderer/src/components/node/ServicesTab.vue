@@ -76,8 +76,7 @@ const emit = defineEmits(['toggle', 'restart', 'logs', 'edit'])
 // The service each id resolves to (for turning a dependency ref into a name + category).
 const serviceById = computed(() => Object.fromEntries(props.services.map((s) => [s.id, s])))
 
-// A service's outgoing dependencies (what it connects to), flattened across the role
-// buckets in config.dependencies. Each ref resolves to the target's short name + category;
+// Outgoing dependencies, flattened across the config.dependencies role buckets;
 // `missing` = the dependency isn't a service on this node (e.g. an external client).
 const DEP_ROLES = ['executionClients', 'consensusClients', 'validatorClients', 'mevboost', 'otherServices']
 function shortName(type) {

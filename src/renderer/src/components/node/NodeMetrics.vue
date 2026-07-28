@@ -90,9 +90,7 @@
                             <span class="client-sync" :class="syncClass(service.metric)">{{ syncLabel(service.metric) }}</span>
                         </div>
 
-                        <!-- Both metrics render unconditionally - a missing value shows an
-                             empty track and a "-" readout instead of removing the row, so
-                             the layout never jumps when a single probe misses a poll. -->
+                        <!-- Missing values render an empty track + "-" instead of removing the row, so the layout never jumps on a missed poll. -->
                         <div class="client-metrics">
                             <div class="client-metric">
                                 <span class="metric-tag">sync</span>
@@ -140,8 +138,7 @@ const props = defineProps({
 
 const hovered = ref(null)
 
-// Fixed-order categorical palette (see base.css --chart-N). Assigned by slot, never
-// cycled - a 7th+ service reuses the last slot rather than inventing a colour.
+// Categorical palette (base.css --chart-N), assigned by slot, never cycled - 7th+ reuses the last slot.
 const CHART_COLORS = ['--chart-1', '--chart-2', '--chart-3', '--chart-4', '--chart-5', '--chart-6']
 const chartColor = (i) => `var(${CHART_COLORS[Math.min(i, CHART_COLORS.length - 1)]})`
 
@@ -149,8 +146,7 @@ const diskUsedPct = computed(() =>
     props.disk?.totalBytes ? Math.round((props.disk.usedBytes / props.disk.totalBytes) * 100) : 0
 )
 
-// Disk fills earlier-warning than CPU/mem - running out is fatal for a node (geth needs
-// headroom to compact), so warn at 80% and alarm at 90%.
+// Warns earlier than CPU/mem (80/90) - a full disk is fatal for a node.
 const diskLevel = computed(() => {
     const p = diskUsedPct.value
     if (p >= 90) return 'danger'
@@ -158,7 +154,6 @@ const diskLevel = computed(() => {
     return 'ok'
 })
 
-// Stacked segments: one per service (coloured), then "Other" used space, then free.
 const diskSegments = computed(() => {
     const d = props.disk
     if (!d?.totalBytes) return []
@@ -178,15 +173,13 @@ const diskSegments = computed(() => {
     return segs.map((s) => ({ ...s, width: `${(s.bytes / d.totalBytes) * 100}%` }))
 })
 
-// Services that have client metrics, each augmented with its `metric` so <SetupGroups>
-// can group them by setup + category (EC/CC) while the slot reads service.metric directly.
+// Metric is merged onto each service so the <SetupGroups> slot reads service.metric directly.
 const clientServices = computed(() =>
     props.services
         .filter((s) => props.clients[s.id])
         .map((s) => ({ ...s, metric: props.clients[s.id] }))
 )
 
-// Threshold colouring for the usage bars.
 function level(pct) {
     if (pct == null) return 'unknown'
     if (pct >= 90) return 'danger'
@@ -203,15 +196,13 @@ function syncClass(m) {
     return 'warning'
 }
 
-// Sync bar: amber while syncing (not done yet), green once synced.
 function syncBarLevel(m) {
     return m.syncing === false ? 'ok' : 'warning'
 }
 function headLabel(m) {
     if (m.head == null) return ''
     const noun = m.role === 'execution' ? 'block' : 'slot'
-    // Denominator: EL uses eth_syncing's highestBlock (network head); CL-via-Prometheus
-    // uses the wall-clock target slot. Both only while there's a target (i.e. syncing).
+    // Denominator: EL = eth_syncing highestBlock, CL-via-Prometheus = wall-clock target slot; only while syncing.
     const denom = m.role === 'execution' ? m.target : (m.source === 'prometheus' ? m.clock : null)
     if (denom != null) return `${noun} ${m.head.toLocaleString()} / ${denom.toLocaleString()}`
     return `${noun} ${m.head.toLocaleString()}`
@@ -267,8 +258,7 @@ function bytes(n) {
     flex-direction: column;
     gap: var(--space-3);
 }
-/* Matches the section-title recipe (see Updates.vue / design system) - without it the
-   heading falls through to the base reset and renders as plain body text. */
+/* Section-title recipe (design system) - without it the heading renders as plain body text. */
 .section-title {
     font-size: var(--font-size-button);
     font-weight: var(--font-weight-semibold);
@@ -341,8 +331,7 @@ function bytes(n) {
 .bar-fill.warning { background: var(--color-warning); }
 .bar-fill.danger { background: var(--color-danger); }
 .bar-fill.unknown { background: var(--ev-c-gray-2); }
-/* Syncing with no computable %: a fixed-width fill sweeps across the (overflow-hidden)
-   track. Colour still comes from the level class (amber while syncing). */
+/* No computable sync %: fixed-width fill sweeps the overflow-hidden track; colour still from the level class. */
 .bar-fill.indeterminate {
     width: 33%;
     animation: bar-indeterminate 1.3s linear infinite;

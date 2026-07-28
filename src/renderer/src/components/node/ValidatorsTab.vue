@@ -8,8 +8,7 @@
 </template>
 
 <script setup>
-// Placeholder for the upcoming validator key-management work. Kept as its own component
-// so the reserved "Validators" tab already has a home; wire real props/emits when built.
+// Placeholder so the reserved "Validators" tab has a home; wire real props/emits when built.
 defineProps({
     services: { type: Array, default: () => [] },
 })

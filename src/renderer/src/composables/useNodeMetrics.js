@@ -1,15 +1,8 @@
 import { ref, unref } from 'vue'
 
 /**
- * Live node monitoring for the node detail view. Polls the two read-only metrics
- * channels while started; the caller drives start()/stop() from onMounted/onUnmounted
- * (same lifecycle as the container-status poll in Node.vue).
- *
- * System and client metrics are fetched independently - the cheap system strip
- * renders immediately without waiting on the slower `docker run` client probe - and
- * each carries its own in-flight guard (no overlapping ticks) and error. Disk usage
- * is the heavy probe (per-service `du`), so it rides its own much slower interval.
- *
+ * View-scoped metrics polling; caller drives start()/stop() from mount hooks.
+ * System/client fetches are independent (each with its own in-flight guard + error); disk is the heavy `du` probe on its own slower interval.
  * @param {string|import('vue').Ref<string>} nodeId
  * @param {{ intervalMs?: number, diskIntervalMs?: number, shouldPoll?: () => boolean }} [opts]
  */
@@ -27,9 +20,7 @@ export function useNodeMetrics(nodeId, { intervalMs = 5000, diskIntervalMs = 300
     let systemInFlight = false
     let clientsInFlight = false
     let diskInFlight = false
-    // serviceId → consecutive polls whose probe answered but carried no peer count.
-    // A single timed-out peer curl (while Prometheus still supplies sync) must not
-    // blank the peer bar for one tick - carry the last known count for a few polls.
+    // serviceId -> consecutive peer-less probes; carry the last known peer count so one timed-out curl doesn't blank the bar.
     const PEER_MISS_LIMIT = 3
     let peerMisses = {}
 

@@ -18,11 +18,8 @@ function nodeLabel(node) {
     return node?.name || node?.host || node?.id || 'node'
 }
 
-// Long-running node operations, dispatched async through the task manager via the single
-// `run-node-task` channel. Each entry maps an allowlisted action to a label and the Node
-// call; `args` is the positional arg array sent from the renderer. Adding a new tracked
-// op means one line here - no new IPC channel. (Read/fetch calls stay as their own
-// channels since the renderer needs their return value synchronously.)
+// Allowlist for the single `run-node-task` channel - adding a tracked op is one line here, no new channel.
+// Read/fetch calls keep their own channels: the renderer needs their return value synchronously.
 const NODE_TASK_ACTIONS = {
     'start-service':            { label: () => 'Start service',          run: (node, [id]) => node.startService(id) },
     'stop-service':             { label: () => 'Stop service',           run: (node, [id]) => node.stopService(id) },
@@ -144,9 +141,7 @@ export function initializeIpcHandlers() {
         }
     });
 
-    // Single async entry point for all long-running node operations (see NODE_TASK_ACTIONS).
-    // Fires the op through the task manager and returns its task id immediately; the
-    // renderer observes progress/completion via the `task-updated` stream.
+    // Async entry point for long-running node ops: returns the task id immediately, progress via `task-updated`.
     ipcMain.handle('run-node-task', (_, nodeId, action, args = []) => {
         const node = nodeManager.findNode(nodeId)
         if (!node) throw new Error('Node not found')

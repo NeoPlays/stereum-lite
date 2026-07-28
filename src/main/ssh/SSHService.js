@@ -42,9 +42,7 @@ export class SSHConnection {
 export class SSHService {
     static MAX_SESSION_COUNT = 5
     static EXEC_TIMEOUT_MS = 15_000
-    // Idle window for long-running playbook execs. The timer resets on every output
-    // chunk, so this only needs to cover the longest *silent* stretch (e.g. an apt
-    // upgrade or docker image pull), not the playbook's total runtime.
+    // Idle window for playbook execs - resets on output, so it only covers the longest silent stretch, not total runtime
     static PLAYBOOK_TIMEOUT_MS = 10 * 60_000
     static KEEPALIVE_INTERVAL_MS = 10_000
     static KEEPALIVE_COUNT_MAX = 3
@@ -174,9 +172,7 @@ export class SSHService {
               let settled = false
               let activeStream = null
               let timer = null
-              // Idle timeout: re-armed on every output chunk. A live but long-running
-              // command keeps producing output and never trips it; a dead socket goes
-              // silent and rejects after timeoutMs.
+              // Idle timeout: re-armed on every output chunk, so only a silent/dead socket trips it
               const arm = () => {
                 if (timer) clearTimeout(timer)
                 timer = setTimeout(() => {
@@ -218,10 +214,7 @@ export class SSHService {
         })
     }
 
-    /**
-     * Stream a long-running command. Buffers stdout into newline-delimited lines and
-     * invokes onLine for each one. Returns a handle with abort() that closes the channel.
-     */
+    /** Stream a long-running command line-by-line via onLine; returns a handle with abort(). */
     async execStream(command, { onLine, onClose, onError, useSudo = true } = {}) {
         if (useSudo) command = "sudo " + command
         log.debug('SSH :: STREAM :: %s', command)

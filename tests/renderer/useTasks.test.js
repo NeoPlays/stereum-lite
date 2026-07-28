@@ -106,7 +106,7 @@ describe('useTasksStore', () => {
             const s = useTasksStore()
             await s.refreshTasks()
             const p = s.awaitTask('a')
-            // Still running → not resolved yet; a running update must not resolve it.
+            // A running update must not resolve the awaiter.
             listeners['task-updated'](running('a'))
             listeners['task-updated'](done('a', 'failed'))
             const settled = await p

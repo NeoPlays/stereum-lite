@@ -113,7 +113,6 @@ describe('useNodesStore', () => {
         it('attempts reconnect before giving up when the node is disconnected', async () => {
             const s = useNodesStore()
             s.nodes = [{ id: 'a', status: 'disconnected' }]
-            // reconnect-node succeeds, get-node returns the DTO
             invoke
                 .mockResolvedValueOnce(true) // reconnect-node
                 .mockResolvedValueOnce({ id: 'a', name: 'n' }) // get-node

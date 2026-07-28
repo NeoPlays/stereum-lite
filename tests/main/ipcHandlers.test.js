@@ -73,8 +73,7 @@ const { handlers, fakeStorage, fakeNode, fakeNodeManager, fakeTaskManager, fakeW
             findNodeByEndpoint: vi.fn(),
             disconnectNode: vi.fn(),
         },
-        // Fire-and-forget: run(label, fn) invokes fn (so the node method is called) and
-        // returns a task id synchronously.
+        // Fire-and-forget: run(label, fn) invokes fn and returns a task id synchronously.
         fakeTaskManager: {
             onUpdate: vi.fn(),
             run: vi.fn((label, fn) => { fn(); return 'task-123' }),

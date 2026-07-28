@@ -53,7 +53,6 @@ describe('parseAnsi', () => {
 
     it('treats SGR 22 as cancelling bold + dim only (other styles persist)', () => {
         const segs = parseAnsi(`${ESC}[1;2;4ma${ESC}[22mb`)
-        // 'a' is bold+dim+underline. 'b' should still be underlined after 22.
         expect(segs[0].classes).toEqual(expect.arrayContaining(['ansi-bold', 'ansi-dim', 'ansi-underline']))
         expect(segs[1].classes).toContain('ansi-underline')
         expect(segs[1].classes).not.toContain('ansi-bold')
@@ -102,7 +101,6 @@ describe('parseAnsi', () => {
     })
 
     it('lone reset (ESC[0m) emits no segments when surrounded by no text', () => {
-        // No text on either side → nothing to emit
         expect(parseAnsi(`${ESC}[0m`)).toEqual([])
     })
 })

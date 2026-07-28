@@ -19,7 +19,7 @@ const { FakeClient, FakeStream } = vi.hoisted(() => {
             this.connectArgs = []
             this.connect = (...a) => { this.connectArgs.push(a) }
             this.end = (..._a) => {}
-            this.exec = (..._a) => {} // overridden per-test via mockImplementationOnce-like pattern
+            this.exec = (..._a) => {} // overridden per-test
         }
     }
     FakeClient.instances = []
@@ -367,22 +367,18 @@ describe('SSHService', () => {
             await p
             expect(onState).toHaveBeenCalledWith('connected')
             expect(svc._reachable).toBe(true)
-            // Pre-set state to 'connected' guard against backoff trigger from dropConnection
-            // (we want the disconnected emit path, not the auto-reconnect path)
+            // skip auto-reconnect so we hit the disconnected-emit path, not backoff
             svc._lastState = 'connected'
-            svc._reconnecting = true // skip auto reconnect for this test
+            svc._reconnecting = true
             client.emit('close')
-            // The branch: !this._reconnecting → emit 'disconnected'. But we set _reconnecting=true to skip backoff.
-            // Re-test without that flag to verify disconnected when wasConnected=false:
+            // re-test without _reconnecting to verify 'disconnected' when wasConnected=false:
             const svc2 = new SSHService(makeParams(), onState)
             svc2._lastState = null
-            // simulate a connection drop without prior 'connected' state
-            // (i.e. initial connect failure path)
+            // initial connect failure - no prior 'connected' state
             const p2 = svc2.connect()
             const c2 = FakeClient.instances[FakeClient.instances.length - 1]
             setImmediate(() => c2.emit('error', new Error('refused')))
             await p2.catch(() => {})
-            // dropConnection ran; wasConnected was false, _reconnecting was false → 'disconnected' emit
             expect(onState).toHaveBeenCalledWith('disconnected')
         })
 
@@ -398,14 +394,12 @@ describe('SSHService', () => {
         })
 
         it('removes the right entry on close (uses sshConn.id, not conn.id)', async () => {
-            // Two sequential connects should both leave the pool empty after both close
             const svc = new SSHService(makeParams())
             svc._reconnecting = true // suppress auto-reconnect on drop for test isolation
 
             const p1 = svc.connect()
             driveReady(FakeClient.instances[0], 'h1')
             await p1
-            // Open a second connection (manually push, since exec would normally do it)
             const p2 = svc.connect()
             driveReady(FakeClient.instances[1], 'h1')
             await p2
@@ -429,8 +423,7 @@ describe('SSHService', () => {
                 sessionCount: 0,
             }]
             const promise = svc.exec('hang', false)
-            // Attach the assertion's catch handler before advancing time, so the rejection
-            // never spends a microtask as "unhandled" between fire and await.
+            // attach the rejection handler before advancing time so the rejection is never "unhandled"
             const assertion = expect(promise).rejects.toMatchObject({ rc: -1, message: /timeout/i })
             await vi.advanceTimersByTimeAsync(SSHService.EXEC_TIMEOUT_MS)
             await assertion

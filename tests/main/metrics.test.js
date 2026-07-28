@@ -31,8 +31,7 @@ const SYSTEM_OUTPUT = [
 describe('parseSystemMetrics', () => {
     it('computes CPU% from the delta between the two samples', () => {
         const { cpu } = parseSystemMetrics(SYSTEM_OUTPUT)
-        // sample1 total = 9800, idle+iowait = 8200; sample2 total = 10200, idle = 8500
-        // idleDelta=300, totalDelta=400 → usage = (1 - 300/400)*100 = 25
+        // idleDelta=300, totalDelta=400 → (1 - 300/400)*100 = 25
         expect(cpu.usagePct).toBe(25)
         expect(cpu.cores).toBe(4)
         expect(cpu.load1).toBe(0.42)
@@ -240,10 +239,7 @@ describe('parseClientMetrics', () => {
         expect(r).toMatchObject({ source: 'beacon-api', syncPct: 95, peers: 64 })
     })
 
-    // A timed-out curl emits nothing, so its JSON is simply absent from the block.
-    // Responses must be matched by request id (EL) / shape (CL), never by position -
-    // positional parsing read the next response in the missing one's place, which
-    // blanked the peer bar (and could misreport sync) for that poll.
+    // A timed-out curl's JSON is simply absent: responses must be matched by request id (EL) / shape (CL), never by position.
     it('a missing net_peerCount response leaves peers null without shifting eth_blockNumber into its place', () => {
         const out = `===${geth.id}===\n{"id":1,"result":false}\n\n{"id":3,"result":"0x14f6a1"}`
         const r = parseClientMetrics(out, [geth])[geth.id]

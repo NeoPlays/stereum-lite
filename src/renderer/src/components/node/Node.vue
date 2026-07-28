@@ -111,7 +111,7 @@ const {
     shouldPoll: () => activeTab.value === 'metrics' && nodeData.value && !loading.value && !store.isDisconnected(route.params.id),
 })
 
-// Tabs on the node detail view. Validators is reserved for the upcoming key-management work.
+// Validators is reserved for the upcoming key-management work.
 const tabs = [
     { id: 'services', label: 'Services' },
     { id: 'metrics', label: 'Metrics' },
@@ -120,8 +120,6 @@ const tabs = [
 ]
 const activeTab = ref('services')
 
-// Metrics only fetch while their tab is visible: start (and re-fetch immediately) on
-// entering the tab, stop the pollers on leaving it.
 watch(activeTab, (tab) => {
     if (tab === 'metrics') startMetrics()
     else stopMetrics()
@@ -204,7 +202,7 @@ async function disconnect() {
     router.push('/')
 }
 
-// Copy hostname / IP from the header (restores what the old Updates page offered).
+// Copy hostname / IP from the header.
 const copied = ref(null)
 let copiedTimer = null
 async function copy(text, key) {
@@ -231,8 +229,7 @@ let statusInterval = null
 
 onMounted(async () => {
     await load()
-    // If Metrics is the active tab on mount, kick off its pollers (the watch above only
-    // fires on change, not initial value).
+    // The tab watch doesn't fire on the initial value, so start pollers here if Metrics is already active.
     if (activeTab.value === 'metrics') startMetrics()
     statusInterval = setInterval(async () => {
         if (nodeData.value && !loading.value && !store.isDisconnected(route.params.id)) {

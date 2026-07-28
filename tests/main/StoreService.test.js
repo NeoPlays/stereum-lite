@@ -95,7 +95,6 @@ describe('StoreService', () => {
                 ])
             storage.importFromStereum()
             const persisted = fakeStore.set.mock.calls[0][1]
-            // existing 'A' kept (orig host), 'NEW' appended
             expect(persisted.find(s => s.name === 'A').host).toBe('orig')
             expect(persisted.find(s => s.name === 'NEW')).toBeTruthy()
             expect(persisted).toHaveLength(2)

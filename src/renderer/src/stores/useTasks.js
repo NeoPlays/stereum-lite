@@ -1,12 +1,9 @@
 import { defineStore } from 'pinia'
 
-// taskId -> [resolve, ...] for callers awaiting a task's completion. Kept outside the
-// store state (plain functions, not reactive data) and resolved from _upsert when a
-// matching task reaches a terminal status.
+// taskId -> [resolve, ...]; kept outside store state (functions aren't reactive data), resolved from _upsert on terminal status.
 const waiters = new Map()
 
-// Mirrors the main-process TaskManager. Hydrates once via `get-tasks`, then stays
-// live off the `task-updated` push event (create + every status transition).
+// Mirrors the main-process TaskManager: hydrate once via `get-tasks`, then stay live off `task-updated`.
 export const useTasksStore = defineStore('tasks', {
     state: () => ({
         tasks: [], // newest first, full DTOs { id, label, nodeId, status, createdAt, startedAt, endedAt, subTaskCount, subTasks, output, error }
@@ -14,7 +11,7 @@ export const useTasksStore = defineStore('tasks', {
     }),
     getters: {
         runningCount: (state) => state.tasks.filter((t) => t.status === 'running').length,
-        // Most-recent first; the store already keeps that order.
+        // Newest first (store insertion order).
         recent: (state) => state.tasks,
     },
     actions: {
@@ -41,8 +38,7 @@ export const useTasksStore = defineStore('tasks', {
                 console.error('Error fetching tasks:', error)
             })
         },
-        // Fire a long-running node op as a background task. Resolves to its task id
-        // immediately; observe completion via awaitTask or the live `tasks` list.
+        // Fire a node op as a background task; resolves to its task id immediately (observe via awaitTask).
         runNodeTask(nodeId, action, args = []) {
             this._subscribe()
             return window.api.invoke('run-node-task', nodeId, action, args).then((r) => r?.taskId)

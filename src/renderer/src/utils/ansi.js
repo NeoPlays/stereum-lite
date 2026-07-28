@@ -1,5 +1,4 @@
-// ANSI SGR + CSI handling for terminal-style log rendering.
-// Only SGR ('m') affects styling; other CSI sequences (cursor moves, erases) are stripped silently.
+// ANSI handling for log rendering: only SGR ('m') affects styling; other CSI sequences are stripped silently.
 
 const CSI = /\x1b\[[0-9;]*[a-zA-Z]/g
 

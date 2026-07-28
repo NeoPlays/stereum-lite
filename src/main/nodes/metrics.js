@@ -1,23 +1,13 @@
 /**
- * Node monitoring - host system metrics + per-client (execution/consensus) health.
- *
- * Two concerns live here, both as pure parsers so they can be unit-tested against
- * captured fixtures (same pattern as `parseSubTasks`):
- *   - system:  one SSH exec over /proc + df  → { cpu, memory, disk }
- *   - clients: one `docker run` curl sidecar  → { [serviceId]: { syncing, peers, … } }
- *
- * The client probe runs a throwaway `curlimages/curl` container attached to the
- * stereum docker network, so it can reach each client by its container name
- * (`stereum-<id>`) over docker's embedded DNS at the client's *internal* API port -
- * independent of whether the RPC port is published to the host.
+ * Node monitoring: pure, unit-testable parsers for system metrics (one SSH exec) and
+ * client health (a curl sidecar on the stereum network, reaching each client by
+ * container name at its internal API port - no host publishing needed).
  */
 
 // ── System metrics ──────────────────────────────────────────────────────────
 
-// Marker-delimited so parsing is positional-independent and resilient to a missing
-// section (same delimiter trick as the client probe below). No sudo: every source
-// here is world-readable. Disk is NOT here - it's the separate, heavier disk-breakdown
-// probe (per-service `du`), polled on a slower cadence than these cheap counters.
+// Marker-delimited so a missing section can't shift parsing. No sudo needed (all
+// world-readable). Disk lives in the separate, heavier slow-polled probe below.
 export const SYSTEM_METRICS_CMD = [
     "echo '#cpu1'", "grep '^cpu ' /proc/stat",
     'sleep 0.2',
@@ -36,8 +26,7 @@ function parseCpuLine(line) {
 }
 
 /**
- * Parse the marker-delimited output of {@link SYSTEM_METRICS_CMD} into a DTO.
- * CPU% comes from the delta between the two `/proc/stat` samples.
+ * Parse {@link SYSTEM_METRICS_CMD} output; CPU% from the delta of the two /proc/stat samples.
  * @returns {{ cpu:{usagePct:number|null,cores:number|null,load1:number|null},
  *             memory:{usedBytes:number,totalBytes:number,usedPct:number}|null,
  *             disk:{mount:string,usedBytes:number,totalBytes:number,usedPct:number}|null }}
@@ -65,8 +54,7 @@ export function parseSystemMetrics(stdout) {
     const cores = toNum(sections.cores?.[0])
     const load1 = toNum(sections.load?.[0]?.split(/\s+/)[0])
 
-    // Memory (kB in /proc/meminfo → bytes). Used = Total − Available (the modern,
-    // buffers/cache-aware definition, matching `free`'s "available").
+    // Used = Total - Available (buffers/cache-aware, matches `free`); /proc/meminfo is kB.
     let memory = null
     const memTotalKb = toNum(sections.mem?.find(l => l.startsWith('MemTotal:'))?.match(/(\d+)/)?.[1])
     const memAvailKb = toNum(sections.mem?.find(l => l.startsWith('MemAvailable:'))?.match(/(\d+)/)?.[1])
@@ -81,10 +69,8 @@ export function parseSystemMetrics(stdout) {
 
 // ── Disk breakdown (per-service) ──────────────────────────────────────────────
 
-// System / pseudo filesystems that monitoring services bind-mount for host inspection
-// - never `du` these. PrometheusNodeExporter mounts `/` (`/:/host:ro,rslave`) and
-// MetricsExporter mounts `/proc`, `/sys`, `/` (all `ro`). du-ing them would walk the
-// whole host and misattribute all of its disk to that one service.
+// Never `du` these: monitoring services bind-mount them (NodeExporter `/`, MetricsExporter
+// `/proc`,`/sys`,`/`) and du-ing would walk the whole host, misattributing its disk.
 const SYSTEM_MOUNTS = new Set(['/', '/proc', '/sys', '/dev', '/run', '/boot', '/etc', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/var'])
 
 const normalizePath = (p) => p.replace(/\/+$/, '') || '/'
@@ -96,13 +82,8 @@ function pathsOverlap(a, b) {
 }
 
 /**
- * Host-side paths of a service's bind-mount volumes, filtered to what's safe and
- * meaningful to measure. A stereum volume is stored as `<host>[:<container>[:opts]]`
- * (opts e.g. `ro,rslave`). We keep absolute host paths that are the service's own
- * writable data and drop:
- *   - named/relative volumes (no host dir),
- *   - read-only mounts (host-inspection, not the service's data),
- *   - system/pseudo filesystems (safety net if a system mount isn't flagged `ro`).
+ * Host paths of a service's own writable bind mounts (`<host>[:<container>[:opts]]`);
+ * drops named/relative volumes, `ro` mounts, and system mounts (safety net when not `ro`).
  * @param {{ volumes?: string[] }} config
  * @returns {string[]} unique absolute host paths
  */
@@ -127,10 +108,8 @@ function shellQuote(s) {
 }
 
 /**
- * Build the disk-breakdown command: one `du -sb` over every service's host volume
- * paths (bytes + path per line), then a `df` for the filesystem holding them. `du`
- * walks the tree, so this is the heavy probe - run it on a slow cadence, not the
- * 5s health poll. Missing paths are ignored (`2>/dev/null`).
+ * Build the disk-breakdown command: `du -sb` per service volume path + one `df`.
+ * `du` walks the tree - heavy probe, slow cadence only, not the 5s health poll.
  * @param {{ id:string, config?:object }[]} services
  * @param {string} dfTarget - a path on the filesystem to report totals for
  */
@@ -144,9 +123,7 @@ export function buildDiskBreakdownCommand(services = [], dfTarget = '/') {
 }
 
 /**
- * Parse the du + df output into a stacked-bar DTO. Each service's footprint is the
- * sum of `du` over its host paths; `other` is used space not attributable to a
- * service; `free` is total − used.
+ * Parse the du + df output into a stacked-bar DTO (per-service bytes + other + free).
  * @param {string} stdout
  * @param {{ id:string, config?:object }[]} services
  * @returns {{ mount:string, totalBytes:number, usedBytes:number, freeBytes:number,
@@ -171,10 +148,8 @@ export function parseDiskBreakdown(stdout, services = []) {
     const totalBytes = toNum(p[1]), usedBytes = toNum(p[2])
     if (totalBytes == null || usedBytes == null || totalBytes <= 0) return null
 
-    // Count each host path once, even when several services mount it (the CL mounts
-    // the EL's engine.jwt; Prysm-devnet mounts the EL's working dir) or a service
-    // mounts both a dir and something inside it - `claimed` skips overlapping paths so
-    // attributed bytes never exceed real usage.
+    // Count each host path once - services share/nest mounts (engine.jwt, Prysm-devnet
+    // EL dir); `claimed` skips overlaps so attributed bytes never exceed real usage.
     const svcOut = []
     let attributed = 0
     const claimed = []
@@ -199,27 +174,10 @@ export function parseDiskBreakdown(stdout, services = []) {
 // ── Client metrics ──────────────────────────────────────────────────────────
 
 /**
- * Map a stereum service type (`config.service`) → how to read its health.
- * `port` is the client's *internal* (in-container) API port; `api` selects the
- * probe/parse strategy. Execution clients speak JSON-RPC (eth_syncing +
- * net_peerCount); consensus clients speak the Beacon REST API
- * (/eth/v1/node/syncing + /eth/v1/node/peer_count).
- *
- * Ports confirmed against stereum-dev/ethereum-node's launcher service definitions
- * (`launcher/src/backend/ethereum-services/*Service.js` command args / endpoint
- * getters). All EL clients serve HTTP-RPC on 8545 (8551 is the JWT-gated engine port
- * - never probe it). Beacon REST ports vary: Teku 5051, Lodestar 9596, Prysm's REST
- * gateway 3500 (its gRPC is 4000 - use 3500 for the /eth/v1 routes).
- *
- * `peerFlags` / `defaultMaxPeers` drive the peer progress-bar denominator:
- * `resolveMaxPeers` reads the configured flag from the service's command args first,
- * then falls back to the client's built-in default. Confirmed defaults (client docs /
- * current-stable source): Geth 50, Nethermind 50, Besu 25 (`--max-peers` cap),
- * Erigon 32, Reth 130 (inbound 30 + outbound 100 - no single default flag; unified
- * `--max-peers` read when set), Ethrex 100, Lighthouse 200, Prysm 70 (stereum pins
- * `--p2p-max-peers=100` in-config → read from command), Teku 100 (`--p2p-peer-upper-bound`),
- * Nimbus 160, Lodestar 200, Grandine 200 (stereum pins `--target-peers=80` in-config).
- * Do not hand-edit without re-checking the client's CLI.
+ * Service type → probe config. `port` is the *internal* API port, confirmed against
+ * stereum-dev/ethereum-node `launcher/src/backend/ethereum-services/*Service.js`
+ * (never probe 8551 - JWT-gated engine port). `peerFlags`/`defaultMaxPeers` feed
+ * `resolveMaxPeers`; defaults are from client docs - re-check the CLI before editing.
  */
 export const CLIENT_REGISTRY = {
     // Execution (JSON-RPC http port - all 8545)
@@ -229,11 +187,10 @@ export const CLIENT_REGISTRY = {
     ErigonService:     { role: 'execution', api: 'jsonrpc', port: 8545, peerFlags: ['--maxpeers'], defaultMaxPeers: 32 },
     RethService:       { role: 'execution', api: 'jsonrpc', port: 8545, peerFlags: ['--max-peers'], defaultMaxPeers: 130 },
     EthrexService:     { role: 'execution', api: 'jsonrpc', port: 8545, peerFlags: ['--p2p.target-peers'], defaultMaxPeers: 100 },
-    // Consensus (Beacon REST API port). `promClock`/`promHead` are the Prometheus slot
-    // metrics stereum's clients export (see prometheus.yml.j2 / upstream Monitoring
-    // getSyncStatus): clock = wall-clock target slot, head = node's synced slot. Sync %
-    // from these is more reliable than the API's self-reported sync_distance, so it's
-    // preferred when Prometheus is up, with the beacon API as fallback.
+    // Consensus (Beacon REST port - Prysm's REST gateway is 3500, NOT its gRPC 4000).
+    // promClock/promHead: exported slot metrics (clock = wall-clock target, head = synced
+    // slot; names from stereum's prometheus.yml.j2 / upstream Monitoring getSyncStatus) -
+    // more reliable than the API's sync_distance.
     LighthouseBeaconService: { role: 'consensus', api: 'beacon', port: 5052, peerFlags: ['--target-peers'], defaultMaxPeers: 200, promClock: 'slotclock_present_slot', promHead: 'beacon_head_state_slot' },
     PrysmBeaconService:      { role: 'consensus', api: 'beacon', port: 3500, peerFlags: ['--p2p-max-peers'], defaultMaxPeers: 70, promClock: 'beacon_clock_time_slot', promHead: 'beacon_head_slot' },
     TekuBeaconService:       { role: 'consensus', api: 'beacon', port: 5051, peerFlags: ['--p2p-peer-upper-bound'], defaultMaxPeers: 100, promClock: 'beacon_slot', promHead: 'beacon_head_slot' },
@@ -245,9 +202,8 @@ export const CLIENT_REGISTRY = {
 // Image used for the throwaway probe sidecar.
 export const CURL_IMAGE = 'curlimages/curl'
 
-// The docker network every stereum service container joins - confirmed at
-// controls/roles/manage-service/tasks/main.yml (`docker_network: name: stereum`).
-// Containers resolve each other by name (`stereum-<uuid>`) over its embedded DNS.
+// Network every stereum container joins (controls/roles/manage-service/tasks/main.yml);
+// containers resolve each other by name over its embedded DNS.
 export const STEREUM_DOCKER_NETWORK = 'stereum'
 
 // Prometheus service type + internal port (PrometheusService.js ServicePortDefinition).
@@ -256,9 +212,8 @@ export const PROMETHEUS_PORT = 9090
 // Marker for the Prometheus response block in the sidecar output (not a service id).
 const PROM_KEY = '__prom__'
 
-// JSON-RPC request ids for the execution-client probe - parseJsonRpc matches
-// responses by id rather than position (a failed curl emits nothing, which would
-// otherwise shift every later response one slot up).
+// Responses are matched by id, not position - a failed curl emits nothing and would
+// otherwise shift every later response one slot up.
 const RPC_IDS = { syncing: 1, peers: 2, block: 3 }
 
 /** Container name for a service id (hyphen - matches stereum's convention). */
@@ -267,14 +222,9 @@ const containerName = (id) => `stereum-${id}`
 const marker = (id) => `===${id}===`
 
 /**
- * Build the sidecar shell script that probes every probeable running client, or
- * null when there's nothing to probe. Each client emits a `===<id>===` marker line
- * followed by its raw JSON responses, separated by a blank line. Per-request `-m 3`
- * so one hung client can't stall the batch.
- *
- * When `promHost` (`stereum-<id>:9090`) is given and a consensus client is running,
- * an extra `===__prom__===` block queries Prometheus once for all the beacon slot
- * metrics - the preferred, more reliable sync source (see parseClientMetrics).
+ * Build the sidecar script probing each running client (marker line + raw JSON blocks;
+ * `-m 3` per request so one hung client can't stall the batch), plus one Prometheus
+ * query block when `promHost` is given; null when nothing to probe.
  * @param {{ id:string, config?:{ service?:string }, container?:{ state?:string } }[]} services
  * @param {{ promHost?: string|null }} [opts]
  * @returns {string|null}
@@ -290,8 +240,6 @@ export function buildClientProbeScript(services = [], { promHost = null } = {}) 
         const host = `${containerName(svc.id)}:${reg.port}`
         blocks.push(`echo '${marker(svc.id)}'`)
         if (reg.api === 'jsonrpc') {
-            // Distinct request ids (RPC_IDS) - responses are matched back by id, so a
-            // single timed-out curl drops its own value instead of shifting the rest.
             const rpc = (method, reqId) =>
                 `curl -s -m 3 -X POST -H 'content-type: application/json' ` +
                 `-d '{"jsonrpc":"2.0","method":"${method}","params":[],"id":${reqId}}' http://${host}`
@@ -299,8 +247,7 @@ export function buildClientProbeScript(services = [], { promHost = null } = {}) 
             blocks.push("echo ''")
             blocks.push(rpc('net_peerCount', RPC_IDS.peers))
             blocks.push("echo ''")
-            // eth_blockNumber gives the head block even when synced (eth_syncing=false
-            // reports no block number), so the sync bar always has a value to show.
+            // eth_blockNumber: head block even when synced (eth_syncing=false has none).
             blocks.push(rpc('eth_blockNumber', RPC_IDS.block))
         } else {
             blocks.push(`curl -s -m 3 http://${host}/eth/v1/node/syncing`)
@@ -320,9 +267,8 @@ export function buildClientProbeScript(services = [], { promHost = null } = {}) 
 }
 
 /**
- * Parse the delimited probe output back into a per-service result map. A client that
- * returned nothing / unparseable JSON gets `{ ..., error }` rather than dropping out,
- * so the UI can show "unavailable" instead of the row vanishing.
+ * Parse probe output into a per-service map; failed probes get `{ ..., error }` (never
+ * dropped) so the UI row stays.
  * @param {string} stdout
  * @param {{ id:string, config?:{ service?:string } }[]} services
  * @returns {{ [serviceId:string]: object }}
@@ -349,8 +295,7 @@ export function parseClientMetrics(stdout, services = []) {
     for (const svc of services) {
         const reg = CLIENT_REGISTRY[svc.config?.service]
         if (!reg) continue
-        // maxPeers is a property of the client's *config*, not its probe response -
-        // resolve it up front so it's present even when the probe itself failed.
+        // maxPeers comes from config, not the probe - present even when the probe failed.
         const base = { role: reg.role, api: reg.api, maxPeers: resolveMaxPeers(svc.config, reg) }
         const block = byId[svc.id]
         const jsons = block ? extractJsonObjects(block.join('\n')) : []
@@ -378,11 +323,8 @@ export function parseClientMetrics(stdout, services = []) {
 }
 
 /**
- * Compute a consensus client's sync from the Prometheus vector: syncPct = head/clock
- * where clock is the wall-clock target slot. Returns null when Prometheus wasn't
- * queried or this client's metrics aren't present (→ caller falls back to the API).
- * Matches by metric name + the scrape `instance` label containing the service id.
- * `head` is the node's synced slot; `clock` is the target (current) slot.
+ * CL sync from the Prometheus vector (syncPct = head/clock, matched by metric name +
+ * `instance` containing the service id); null → caller falls back to the beacon API.
  * @returns {{ syncing:boolean, syncPct:number, head:number, clock:number }|null}
  */
 export function promSyncForService(promVector, serviceId, reg) {
@@ -406,10 +348,8 @@ export function promSyncForService(promVector, serviceId, reg) {
 }
 
 /**
- * The effective max/target peer count for a client - the denominator of the peer
- * progress bar. Reads the configured value from the service's `command` flags
- * (registry `peerFlags`, first match wins) and falls back to the client's documented
- * default (`defaultMaxPeers`) when the flag isn't passed.
+ * Effective max/target peers (peer-bar denominator): configured `command` flag first
+ * (`peerFlags`, first match wins), else the client's `defaultMaxPeers`.
  * @returns {number|null}
  */
 export function resolveMaxPeers(config, reg) {
@@ -419,8 +359,7 @@ export function resolveMaxPeers(config, reg) {
 }
 
 /**
- * Find the value of the first matching CLI flag in a stereum `command` array. Handles
- * both `--flag=value` and `--flag value` (value in the next element) forms, and is
+ * First matching CLI flag value in a `command` array; handles `--flag=v` and `--flag v`,
  * case-insensitive (Nethermind uses `--Network.MaxActivePeers`).
  * @param {string[]} command
  * @param {string[]} flags - candidate flag names incl. leading dashes
@@ -449,15 +388,12 @@ function parseJsonRpc(jsons) {
     const blockRes = byId(RPC_IDS.block)
     if (!syncingRes) throw new Error('no eth_syncing response')
     const sync = syncingRes.result
-    // false => fully synced; object => syncing with currentBlock/highestBlock (hex).
-    // `head` is the imported block, `target` the network head (for a "block x / y" read).
+    // eth_syncing: false = synced; object = syncing with currentBlock/highestBlock (hex).
     let syncing, syncPct, head, target
     if (sync === false) {
         syncing = false
         syncPct = 100
-        // Synced: eth_syncing reports no block number - take the head from eth_blockNumber.
-        // The node IS at the head, so target === head (renders "block x / x", symmetric
-        // with the consensus client which always shows head / clock).
+        // Synced node is at the head, so target = head (renders "block x / x").
         head = blockRes ? hexToNum(blockRes.result) : null
         target = head
     } else if (sync && typeof sync === 'object') {
@@ -471,17 +407,15 @@ function parseJsonRpc(jsons) {
 }
 
 function parseBeacon(jsons) {
-    // Match responses by shape, not position - if the syncing curl times out, the
-    // peer_count response would otherwise be read as the sync response (and vice
-    // versa peers would silently go null, blanking the peer bar for a poll).
+    // Match responses by shape, not position - a timed-out curl would otherwise shift
+    // the other response into the wrong slot.
     const syncingRes = jsons.find((j) => j?.data && j.data.is_syncing !== undefined)
     const peerRes = jsons.find((j) => j?.data && j.data.connected !== undefined)
     const d = syncingRes?.data
     if (!d) {
         const peersOnly = toNum(peerRes?.data?.connected)
         if (peersOnly == null) throw new Error('no beacon syncing response')
-        // Syncing curl failed but peers made it - keep them (Prometheus usually still
-        // supplies sync; without it the row shows peers with an "unknown" sync pill).
+        // Syncing curl failed but peers made it - keep them (Prometheus usually covers sync).
         return { peers: peersOnly }
     }
     const syncing = d.is_syncing === true

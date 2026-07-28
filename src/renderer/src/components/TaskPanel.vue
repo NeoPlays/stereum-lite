@@ -26,8 +26,7 @@
                         <div v-if="expanded.has(task.id)" class="task-body">
                             <p v-if="task.error" class="task-error mono">{{ task.error }}</p>
 
-                            <!-- One block per playbook run. A single-playbook op renders its steps
-                                 flat (no redundant heading); composite ops show a heading per group. -->
+                            <!-- One block per playbook run; a lone playbook renders flat, composites get a heading per group. -->
                             <template v-if="task.groups?.length">
                                 <div v-for="(group, gi) in task.groups" :key="gi" class="group">
                                     <button
@@ -63,8 +62,7 @@
             </div>
         </aside>
 
-        <!-- Sub-task detail: a wide centered modal so the raw ansible output is actually
-             readable, instead of squeezing it into the narrow drawer. -->
+        <!-- Sub-task detail in a wide centered modal - the raw ansible output is unreadable in the narrow drawer. -->
         <div v-if="detail" class="modal-overlay" @click.self="detail = null">
             <div class="modal">
                 <header class="modal-header">
@@ -126,8 +124,7 @@ function toggleGroup(taskId, gi) {
     if (groupExpanded.has(key)) groupExpanded.delete(key)
     else groupExpanded.add(key)
 }
-// A lone group has no header (it can't be collapsed) so its steps are always shown;
-// multi-group tasks start collapsed and open on click.
+// A lone group has no header to toggle, so its steps always show; multi-group starts collapsed.
 function groupOpen(task, gi) {
     if (task.groups.length === 1) return true
     return groupExpanded.has(groupKey(task.id, gi))
@@ -190,8 +187,7 @@ function duration(task) {
     justify-content: space-between;
 }
 
-/* Only the task list scrolls; the header (and its close button) stays put so the
-   panel is always dismissable no matter how many sub-tasks are expanded. */
+/* Only the task list scrolls; the header stays put so the panel is always dismissable. */
 .panel-scroll {
     flex: 1 1 auto;
     min-height: 0;
@@ -242,8 +238,7 @@ function duration(task) {
 }
 
 .task-head {
-    /* Sticky so a long expanded sub-task list can be collapsed from any scroll position -
-       the header (and its toggle chevron) stays pinned to the top of the scroll area. */
+    /* Sticky so a long expanded sub-task list can be collapsed from any scroll position. */
     position: sticky;
     top: 0;
     z-index: 2;
@@ -310,8 +305,7 @@ function duration(task) {
     gap: 2px;
 }
 .group-head {
-    /* Sticky just under the sticky task header so a multi-group task's headings stay
-       reachable while scrolling a long group. */
+    /* Sticky just under the task header so group headings stay reachable while scrolling. */
     position: sticky;
     top: 44px;
     z-index: 1;
@@ -356,8 +350,7 @@ function duration(task) {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    /* Cap the list so a long playbook (dozens of steps) scrolls inside its own box
-       instead of pushing the task/group headers - and the drawer's close - off screen. */
+    /* Cap so a long playbook scrolls in its own box instead of pushing the sticky headers off screen. */
     max-height: 320px;
     overflow-y: auto;
     background-color: var(--color-background-mute);

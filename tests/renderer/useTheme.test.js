@@ -2,9 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useThemeStore } from '@stores/useTheme'
 
-// In-memory localStorage that mirrors the Web Storage API the store relies on.
-// We install this explicitly so the test does not depend on the test environment
-// exposing localStorage as a global (some happy-dom setups don't).
+// In-memory localStorage, installed explicitly - some happy-dom setups don't expose it as a global.
 function fakeLocalStorage() {
     const store = new Map()
     return {
