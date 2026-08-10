@@ -263,6 +263,17 @@ export function initializeIpcHandlers() {
         }
     });
 
+    ipcMain.handle('check-checkpoint-sync', async (_, nodeId, url) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.checkCheckpointSync(url)
+        } catch (error) {
+            log.error('check-checkpoint-sync error:', error)
+            return { ok: false, error: error.message || 'Check failed' }
+        }
+    });
+
     ipcMain.handle('get-raw-service-config', async (_, nodeId, serviceId) => {
         try {
             const node = nodeManager.findNode(nodeId)

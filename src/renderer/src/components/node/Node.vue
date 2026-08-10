@@ -81,7 +81,7 @@
             <ValidatorsTab v-show="activeTab === 'validators'" :services="nodeData.services" />
         </template>
 
-        <ResyncModal v-if="resyncTarget" :service="resyncTarget" @close="resyncTarget = null" @confirm="confirmResync" />
+        <ResyncModal v-if="resyncTarget" :service="resyncTarget" :node-id="route.params.id" @close="resyncTarget = null" @confirm="confirmResync" />
     </div>
 </template>
 

@@ -11,6 +11,7 @@ import {
 import {
     isResyncable, resolveDataDir, isSafeDataDir, updateSyncCommand, supportsCheckpointSync,
 } from "@main/nodes/resync";
+import { buildCheckpointProbeScript, parseCheckpointResult } from "@main/nodes/checkpoint";
 import YAML from 'yaml';
 import { randomUUID } from "crypto";
 import log from 'electron-log';
@@ -243,6 +244,23 @@ export class Node {
         if (wipe.rc !== 0 && wipe.rc !== null) throw new Error(wipe.stderr || `failed to wipe ${dataDir}`)
 
         await this.startService(serviceId)
+    }
+
+    /**
+     * Validate a checkpoint-sync URL the way stereum's one-click installer does: HEAD-probe
+     * `<url>/eth/v2/debug/beacon/states/finalized` (5s) and accept iff it answers HTTP 200.
+     * Runs from a throwaway curl sidecar (guaranteed curl, no host apt-get) - the check is
+     * outbound-only, so no stereum network is needed. Read-only; never mutates the node.
+     * @param {string} url
+     * @returns {Promise<{ ok: boolean, httpCode?: number, error?: string }>}
+     */
+    async checkCheckpointSync(url) {
+        const script = buildCheckpointProbeScript(url)
+        if (!script) return { ok: false, error: 'Enter a valid http(s) URL' }
+        const escaped = script.replace(/'/g, `'"'"'`)
+        const cmd = `docker run --rm --entrypoint sh ${CURL_IMAGE} -c '${escaped}'`
+        const response = await this.sshService.exec(cmd, true, { timeoutMs: 20_000 })
+        return parseCheckpointResult(response.stdout)
     }
 
     /**

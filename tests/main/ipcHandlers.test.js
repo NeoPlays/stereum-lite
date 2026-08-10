@@ -114,6 +114,7 @@ describe('ipcHandlers', () => {
 
     it('registers all expected channels', () => {
         expect(Object.keys(handlers).sort()).toEqual([
+            'check-checkpoint-sync',
             'disconnect-node',
             'fetch-updates-manifest',
             'get-all-nodes',

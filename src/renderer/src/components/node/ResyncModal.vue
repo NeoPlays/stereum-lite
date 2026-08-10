@@ -18,20 +18,43 @@
                 <p class="service-id mono">{{ service.id }}</p>
 
                 <template v-if="isConsensus">
-                    <label class="field-label" for="resync-checkpoint">Checkpoint sync URL <span class="optional">(optional)</span></label>
+                    <label class="field-label" for="resync-source">Checkpoint sync source</label>
+                    <select id="resync-source" v-model="selection" class="source-select" @change="onSelectionChange">
+                        <option value="genesis">Genesis - sync from block 0 (slow)</option>
+                        <optgroup v-if="providers.length" :label="`Checkpoint providers · ${networkLabel}`">
+                            <option v-for="p in providers" :key="p.url" :value="p.url">{{ p.name }}</option>
+                        </optgroup>
+                        <option value="custom">Custom URL…</option>
+                    </select>
+
                     <input
-                        id="resync-checkpoint"
-                        v-model.trim="checkpointUrl"
+                        v-if="selection === 'custom'"
+                        v-model.trim="customUrl"
                         class="url-input mono"
                         type="text"
                         placeholder="https://checkpoint.example.com"
                         autocomplete="off"
                         spellcheck="false"
-                        @keydown.enter="confirm"
+                        @keydown.enter="runCheck"
                     />
-                    <p v-if="urlError" class="url-error">Enter a valid http(s) URL, or leave empty for a genesis resync.</p>
-                    <p v-else class="hint">
-                        {{ checkpointUrl ? 'Fast-syncs from this checkpoint source.' : 'Empty = slower genesis sync from block 0.' }}
+
+                    <!-- Genesis needs no endpoint; a checkpoint must pass the liveness check first. -->
+                    <div v-if="isCheckpoint" class="check-row">
+                        <button class="btn-check" :disabled="checkState === 'checking'" @click="runCheck">
+                            {{ checkState === 'checking' ? 'Checking…' : checkState === 'valid' ? 'Re-check' : 'Check endpoint' }}
+                        </button>
+                        <span class="check-status" :class="checkState">
+                            <template v-if="checkState === 'valid'">✓ Reachable (HTTP 200)</template>
+                            <template v-else-if="checkState === 'invalid'">✗ {{ checkError }}</template>
+                            <template v-else-if="checkState === 'checking'">Validating source on the node…</template>
+                            <template v-else>Not checked yet</template>
+                        </span>
+                    </div>
+                    <p v-if="effectiveUrl" class="hint mono">{{ effectiveUrl }}</p>
+                    <p class="hint">
+                        {{ isCheckpoint
+                            ? 'Fast-syncs from this source. It must pass the check before you can resync.'
+                            : 'Genesis sync replays every block from 0 - reliable but can take hours to days.' }}
                     </p>
                 </template>
                 <p v-else class="hint">Execution clients resync from genesis. This can take a long time.</p>
@@ -39,7 +62,7 @@
 
             <footer class="modal-footer">
                 <button class="btn-ghost" @click="emit('close')">Cancel</button>
-                <button class="btn-danger" @click="confirm">Resync</button>
+                <button class="btn-danger" :disabled="!canResync" @click="confirm">Resync</button>
             </footer>
         </div>
     </div>
@@ -47,35 +70,77 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { providersForNetwork } from '@renderer/utils/checkpointProviders'
 
 const props = defineProps({
     service: { type: Object, required: true },
+    nodeId: { type: [String, Number], required: true },
 })
 const emit = defineEmits(['close', 'confirm'])
 
-const checkpointUrl = ref('')
-const urlError = ref(false)
+// 'genesis' | a provider URL | 'custom'. Genesis is the safe default (no endpoint to trust).
+const selection = ref('genesis')
+const customUrl = ref('')
+const checkState = ref('idle') // 'idle' | 'checking' | 'valid' | 'invalid'
+const checkError = ref('')
+const checkedUrl = ref(null)   // the URL that last passed the check, so editing invalidates it
 
-// Clear the validation message as soon as the user edits the field.
-watch(checkpointUrl, () => { urlError.value = false })
+// supportsCheckpoint is set on the service DTO from the main process (resync.js) - true for
+// consensus clients, the only ones that take a checkpoint-sync URL.
+const isConsensus = computed(() => props.service.supportsCheckpoint === true)
+const shortName = computed(() => (props.service.config?.service ?? props.service.id).replace(/Service$/, ''))
+const networkLabel = computed(() => props.service.config?.network || 'network')
+const providers = computed(() => providersForNetwork(props.service.config?.network))
+
+const isCheckpoint = computed(() => selection.value !== 'genesis')
+// The URL a checkpoint resync would use (null for genesis / an empty custom field).
+const effectiveUrl = computed(() => {
+    if (selection.value === 'genesis') return null
+    if (selection.value === 'custom') return customUrl.value || null
+    return selection.value
+})
+// Genesis can always proceed; a checkpoint must have passed the check for the exact URL in play.
+const canResync = computed(() =>
+    !isCheckpoint.value || (checkState.value === 'valid' && checkedUrl.value === effectiveUrl.value))
+
+// Any change to the chosen source invalidates a prior check.
+watch([selection, customUrl], () => {
+    if (checkedUrl.value !== effectiveUrl.value) { checkState.value = 'idle'; checkError.value = '' }
+})
+
+// Picking a provider from the list auto-validates (custom URLs check on button / Enter).
+function onSelectionChange() {
+    if (isCheckpoint.value && selection.value !== 'custom') runCheck()
+}
+
+async function runCheck() {
+    const url = effectiveUrl.value
+    if (!url) { checkState.value = 'invalid'; checkError.value = 'Enter a URL first'; return }
+    checkState.value = 'checking'
+    checkError.value = ''
+    try {
+        const res = await window.api.invoke('check-checkpoint-sync', props.nodeId, url)
+        if (res?.ok) {
+            checkState.value = 'valid'
+            checkedUrl.value = url
+        } else {
+            checkState.value = 'invalid'
+            checkError.value = res?.error || 'Endpoint check failed'
+        }
+    } catch (e) {
+        checkState.value = 'invalid'
+        checkError.value = e?.message || 'Endpoint check failed'
+    }
+}
 
 // Esc closes from anywhere in the modal (the overlay div can't hold focus itself).
 function onKey(e) { if (e.key === 'Escape') emit('close') }
 onMounted(() => window.addEventListener('keydown', onKey))
 onUnmounted(() => window.removeEventListener('keydown', onKey))
 
-// supportsCheckpoint is set on the service DTO from the main process (resync.js) - true for
-// consensus clients, which take an optional checkpoint-sync URL.
-const isConsensus = computed(() => props.service.supportsCheckpoint === true)
-const shortName = computed(() => (props.service.config?.service ?? props.service.id).replace(/Service$/, ''))
-
 function confirm() {
-    const url = checkpointUrl.value || null
-    if (url && !/^https?:\/\/\S+$/i.test(url)) {
-        urlError.value = true
-        return
-    }
-    emit('confirm', isConsensus.value ? url : null)
+    if (!canResync.value) return
+    emit('confirm', isConsensus.value ? effectiveUrl.value : null)
 }
 </script>
 
@@ -166,11 +231,45 @@ function confirm() {
 .hint {
     font-size: var(--font-size-meta);
     color: var(--ev-c-text-3);
+    word-break: break-all;
 }
-.url-error {
+.source-select {
+    padding: var(--button-padding);
+    background-color: var(--color-background-mute);
+    border: 1px solid var(--ev-c-gray-2);
+    border-radius: var(--radius-md);
+    color: var(--ev-c-text-1);
+    font-size: var(--font-size-secondary);
+    cursor: pointer;
+}
+.source-select:focus { outline: none; border-color: var(--color-accent); }
+
+.check-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+.btn-check {
+    flex-shrink: 0;
+    padding: var(--button-padding-small);
+    background: transparent;
+    border: 1px solid var(--ev-c-gray-2);
+    border-radius: var(--radius-md);
+    color: var(--ev-c-text-1);
+    font-size: var(--font-size-secondary);
+    cursor: pointer;
+    transition: background-color var(--transition-fast);
+}
+.btn-check:hover:not(:disabled) { background-color: var(--ev-c-gray-3); }
+.btn-check:disabled { opacity: 0.5; cursor: default; }
+.check-status {
     font-size: var(--font-size-meta);
-    color: var(--color-danger);
+    color: var(--ev-c-text-3);
 }
+.check-status.valid { color: var(--color-success); }
+.check-status.invalid { color: var(--color-danger); }
+.check-status.checking { color: var(--color-warning); }
 
 .modal-footer {
     display: flex;
@@ -201,5 +300,6 @@ function confirm() {
     cursor: pointer;
     transition: background-color var(--transition-fast);
 }
-.btn-danger:hover { background-color: var(--color-danger-soft); }
+.btn-danger:hover:not(:disabled) { background-color: var(--color-danger-soft); }
+.btn-danger:disabled { opacity: 0.4; cursor: default; }
 </style>
