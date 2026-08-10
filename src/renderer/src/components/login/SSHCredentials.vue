@@ -2,15 +2,24 @@
     <div class="credentials-panel">
         <h2 class="panel-title">SSH Connection</h2>
         <div class="form">
-            <div class="field" v-for="field in fields" :key="field.id">
+            <div class="field" v-for="field in fields" :key="field.id" :style="{ gridColumn: `span ${field.span ?? 6}` }">
                 <label :for="field.id">{{ field.label }}</label>
-                <input
-                    :id="field.id"
-                    :type="field.type ?? 'text'"
-                    v-model="credentials[field.key]"
-                    v-bind="field.modifiers ?? {}"
-                    autocomplete="off"
-                />
+                <div class="input-row">
+                    <input
+                        :id="field.id"
+                        :type="field.type ?? 'text'"
+                        v-model="credentials[field.key]"
+                        v-bind="field.modifiers ?? {}"
+                        autocomplete="off"
+                    />
+                    <button
+                        v-if="field.browse"
+                        type="button"
+                        class="btn-browse"
+                        @click="browsePrivateKey"
+                        :disabled="connecting"
+                    >Browse…</button>
+                </div>
             </div>
         </div>
 
@@ -50,18 +59,27 @@ const { getServer, setServer } = store
 const connecting = ref(false)
 const loginError = ref('')
 
+// `span` is out of the 6-column form grid: pair fields onto shared rows so the panel
+// isn't a tall stack of full-width inputs. Name full; Host wide + Port narrow; the
+// credential pairs split evenly.
 const fields = [
-    { id: 'field-name',        label: 'Name',        key: 'name' },
-    { id: 'field-host',        label: 'Host',        key: 'host' },
-    { id: 'field-port',        label: 'Port',        key: 'port',       type: 'number' },
-    { id: 'field-username',    label: 'Username',    key: 'username' },
-    { id: 'field-password',    label: 'Password',    key: 'password',   type: 'password' },
-    { id: 'field-private-key', label: 'Private Key', key: 'privateKey' },
-    { id: 'field-passphrase',  label: 'Passphrase',  key: 'passphrase', type: 'password' },
+    { id: 'field-name',        label: 'Name',        key: 'name',                       span: 6 },
+    { id: 'field-host',        label: 'Host',        key: 'host',                       span: 4 },
+    { id: 'field-port',        label: 'Port',        key: 'port',       type: 'number',  span: 2 },
+    { id: 'field-username',    label: 'Username',    key: 'username',                    span: 3 },
+    { id: 'field-password',    label: 'Password',    key: 'password',   type: 'password', span: 3 },
+    { id: 'field-private-key', label: 'Private Key', key: 'privateKey',                  span: 3, browse: true },
+    { id: 'field-passphrase',  label: 'Passphrase',  key: 'passphrase', type: 'password', span: 3 },
 ]
 
 async function importServer() {
     await setServer(await window.api.invoke('import-server-from-stereum'))
+}
+
+// Open the OS file picker and store the chosen path (SSHParams reads the key file itself).
+async function browsePrivateKey() {
+    const path = await window.api.invoke('pick-private-key-file')
+    if (path) credentials.value.privateKey = path
 }
 
 async function login() {
@@ -146,15 +164,16 @@ function copyCredentials(creds) {
 }
 
 .form {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px 12px;
 }
 
 .field {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0; /* let a field shrink inside its grid track instead of overflowing */
 }
 
 .field label {
@@ -163,7 +182,32 @@ function copyCredentials(creds) {
     color: var(--ev-c-text-2);
 }
 
+.input-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+}
+.input-row input { flex: 1 1 auto; }
+
+.btn-browse {
+    flex-shrink: 0;
+    padding: 8px 10px;
+    background-color: var(--ev-c-gray-3);
+    color: var(--ev-c-text-1);
+    border: 1px solid var(--ev-c-gray-2);
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 150ms;
+}
+.btn-browse:hover:not(:disabled) { background-color: var(--ev-c-gray-2); }
+
 .field input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     padding: 8px 10px;
     background-color: var(--color-background-mute);
     border: 1px solid var(--ev-c-gray-2);

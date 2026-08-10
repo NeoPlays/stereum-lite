@@ -129,6 +129,7 @@ describe('ipcHandlers', () => {
             'get-tasks',
             'get-upgradable-packages',
             'import-server-from-stereum',
+            'pick-private-key-file',
             'ping',
             'reconnect-node',
             'run-node-task',

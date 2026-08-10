@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, net } from "electron";
+import { ipcMain, BrowserWindow, dialog, net } from "electron";
 import storage from "@main/store/StoreService"
 import nodeManager from "@main/nodes/NodeManager"
 import taskManager from "@main/tasks/TaskManager"
@@ -261,6 +261,20 @@ export function initializeIpcHandlers() {
             log.error('get-disk-usage error:', error)
             throw error
         }
+    });
+
+    // Native "browse for the SSH private key" picker. Returns the absolute file path
+    // (SSHParams reads the file itself), or null if the dialog was cancelled.
+    ipcMain.handle('pick-private-key-file', async () => {
+        const win = BrowserWindow.getFocusedWindow()
+        const opts = {
+            title: 'Select SSH private key',
+            // Keys are usually extensionless (id_ed25519, id_rsa) and often live in a hidden ~/.ssh.
+            properties: ['openFile', 'showHiddenFiles', 'dontAddToRecent'],
+        }
+        const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
+        if (result.canceled || !result.filePaths?.length) return null
+        return result.filePaths[0]
     });
 
     ipcMain.handle('check-checkpoint-sync', async (_, nodeId, url) => {
