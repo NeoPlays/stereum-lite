@@ -369,6 +369,109 @@ describe('Node', () => {
         })
     })
 
+    describe('resyncService', () => {
+        const ID = 'aaaaaaaa-0000-0000-0000-aaaaaaaaaaaa'
+        // Find the sshService.exec call that performed the data-dir wipe.
+        const wipeCall = () => node.sshService.exec.mock.calls.find((c) => c[0].includes('rm -rf'))
+
+        beforeEach(() => {
+            node.settings = { stereum_settings: { settings: { controls_install_path: '/opt/stereum' } } }
+        })
+
+        function mockConfig(yaml) {
+            node.sshService.exec.mockImplementation((cmd) => {
+                if (cmd.includes(`cat /etc/stereum/services/${ID}.yaml`)) return Promise.resolve(ok(yaml))
+                return Promise.resolve(ok())
+            })
+        }
+
+        it('CL: stops, wipes the beacon dir, rewrites the checkpoint flag, then starts - in order', async () => {
+            mockConfig([
+                `id: ${ID}`,
+                'service: LighthouseBeaconService',
+                'command:',
+                '  - --datadir=/opt/app/beacon',
+                'volumes:',
+                `  - /opt/stereum/lighthouse-${ID}/engine.jwt:/engine.jwt`,
+                `  - /opt/stereum/lighthouse-${ID}/beacon:/opt/app/beacon`,
+            ].join('\n'))
+            const stop = vi.spyOn(node, 'stopService').mockResolvedValue()
+            const start = vi.spyOn(node, 'startService').mockResolvedValue()
+            const write = vi.spyOn(node, 'writeServiceConfig').mockResolvedValue()
+
+            await node.resyncService(ID, 'https://checkpoint.example')
+
+            const wipe = wipeCall()
+            expect(wipe[0]).toBe(`sh -c 'rm -rf '/opt/stereum/lighthouse-${ID}/beacon'/*'`)
+            expect(wipe[1]).toBe(true) // sudo
+            // Order: stop -> (reversible) config write -> (irreversible) wipe -> start.
+            const wipeOrder = node.sshService.exec.mock.invocationCallOrder[node.sshService.exec.mock.calls.indexOf(wipe)]
+            expect(stop.mock.invocationCallOrder[0]).toBeLessThan(write.mock.invocationCallOrder[0])
+            expect(write.mock.invocationCallOrder[0]).toBeLessThan(wipeOrder)
+            expect(wipeOrder).toBeLessThan(start.mock.invocationCallOrder[0])
+
+            const writtenYaml = write.mock.calls[0][1]
+            expect(writtenYaml).toContain('--checkpoint-sync-url=https://checkpoint.example')
+        })
+
+        it('CL genesis (no url): adds the insecure-genesis flag', async () => {
+            mockConfig([
+                `id: ${ID}`,
+                'service: LighthouseBeaconService',
+                'command:',
+                '  - --datadir=/opt/app/beacon',
+                'volumes:',
+                `  - /opt/stereum/lighthouse-${ID}/beacon:/opt/app/beacon`,
+            ].join('\n'))
+            vi.spyOn(node, 'stopService').mockResolvedValue()
+            vi.spyOn(node, 'startService').mockResolvedValue()
+            const write = vi.spyOn(node, 'writeServiceConfig').mockResolvedValue()
+
+            await node.resyncService(ID, null)
+            expect(write.mock.calls[0][1]).toContain('--allow-insecure-genesis-sync')
+        })
+
+        it('EL: wipes and restarts but never writes config', async () => {
+            mockConfig([
+                `id: ${ID}`,
+                'service: GethService',
+                'command:',
+                '  - --datadir=/opt/data/geth',
+                'volumes:',
+                `  - /opt/stereum/geth-${ID}/data:/opt/data/geth`,
+            ].join('\n'))
+            vi.spyOn(node, 'stopService').mockResolvedValue()
+            vi.spyOn(node, 'startService').mockResolvedValue()
+            const write = vi.spyOn(node, 'writeServiceConfig').mockResolvedValue()
+
+            await node.resyncService(ID, null)
+            expect(wipeCall()[0]).toBe(`sh -c 'rm -rf '/opt/stereum/geth-${ID}/data'/*'`)
+            expect(write).not.toHaveBeenCalled()
+        })
+
+        it('aborts before any stop/wipe when the data dir is unsafe/unresolved', async () => {
+            // Volume maps to "/" as host - resolveDataDir returns it, isSafeDataDir must reject.
+            mockConfig([
+                `id: ${ID}`,
+                'service: GethService',
+                'volumes:',
+                '  - /:/opt/data/geth',
+            ].join('\n'))
+            const stop = vi.spyOn(node, 'stopService').mockResolvedValue()
+
+            await expect(node.resyncService(ID, null)).rejects.toThrow(/unsafe or unresolved/)
+            expect(stop).not.toHaveBeenCalled()
+            expect(wipeCall()).toBeUndefined()
+        })
+
+        it('aborts for a non-resyncable service type', async () => {
+            mockConfig([`id: ${ID}`, 'service: FlashbotsMevBoostService'].join('\n'))
+            const stop = vi.spyOn(node, 'stopService').mockResolvedValue()
+            await expect(node.resyncService(ID, null)).rejects.toThrow(/not resyncable/)
+            expect(stop).not.toHaveBeenCalled()
+        })
+    })
+
     describe('runPlaybook', () => {
         it('throws when controls_install_path missing', async () => {
             node.settings = { stereum_settings: { settings: {} } }

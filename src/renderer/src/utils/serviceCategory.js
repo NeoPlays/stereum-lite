@@ -52,8 +52,20 @@ function categorize(services) {
 }
 
 /**
+ * The node-wide shared setup (monitoring + other common services). Depending on the
+ * stereum version it surfaces as `type: 'common'` or under the name/id `commonServices`
+ * (type unset) - either way it always renders below the real setups.
+ */
+function isSharedSetup(setup) {
+    if (setup?.type === 'common') return true
+    const tag = `${setup?.id ?? ''} ${setup?.name ?? ''}`.toLowerCase()
+    return tag.includes('commonservices')
+}
+
+/**
  * Group services by setup (multisetup.yaml), then by category: real setups first (by name),
- * `common` last, setup-less services in a trailing headerless group; services must carry `setup` + `config.service`.
+ * the shared/monitoring setup last, setup-less services in a trailing headerless group;
+ * services must carry `setup` + `config.service`.
  * @returns {{ key:string, setup:object|null, categories:{ key, label, services }[] }[]}
  */
 export function groupServices(services = []) {
@@ -66,9 +78,9 @@ export function groupServices(services = []) {
         bySetup.get(su.id).services.push(svc)
     }
     const arr = [...bySetup.values()].sort((a, b) => {
-        const ac = a.setup.type === 'common' ? 1 : 0
-        const bc = b.setup.type === 'common' ? 1 : 0
-        if (ac !== bc) return ac - bc // common last
+        const ac = isSharedSetup(a.setup) ? 1 : 0
+        const bc = isSharedSetup(b.setup) ? 1 : 0
+        if (ac !== bc) return ac - bc // shared/monitoring setup last
         return (a.setup.name || '').localeCompare(b.setup.name || '')
     })
     if (ungrouped.length) arr.push({ key: '__ungrouped', setup: null, services: ungrouped })

@@ -5,6 +5,7 @@
         <SetupGroups :services="services">
             <template #default="{ service }">
                     <div class="service-card" :class="{ highlighted: highlightedId === service.id }">
+                        <div class="service-header">
                         <div class="service-main">
                             <span class="service-name">{{ service.config?.service ?? service.id }}</span>
                             <span class="service-network" v-if="!service.setup && service.config?.network">{{ service.config.network }}</span>
@@ -16,24 +17,37 @@
                             </span>
                         </div>
                         <div class="service-actions">
-                            <button
-                                class="btn-service-action"
-                                :class="isRunning(service) ? 'btn-stop' : 'btn-start'"
-                                @click="emit('toggle', service)"
-                                :disabled="pending.has(service.id)"
-                            >
-                                {{ pending.has(service.id) ? '…' : isRunning(service) ? 'Stop' : 'Start' }}
-                            </button>
-                            <button
-                                v-if="isRunning(service)"
-                                class="btn-service-action btn-restart"
-                                @click="emit('restart', service)"
-                                :disabled="pending.has(service.id)"
-                            >
-                                {{ pending.has(service.id) ? '…' : 'Restart' }}
-                            </button>
-                            <button class="btn-edit" @click="emit('logs', service.id)" :disabled="pending.has(service.id)">Logs</button>
-                            <button class="btn-edit" @click="emit('edit', service.id)" :disabled="pending.has(service.id)">Edit</button>
+                            <div class="action-cluster">
+                                <button
+                                    class="btn-service-action"
+                                    :class="isRunning(service) ? 'btn-stop' : 'btn-start'"
+                                    @click="emit('toggle', service)"
+                                    :disabled="pending.has(service.id)"
+                                >
+                                    {{ pending.has(service.id) ? '…' : isRunning(service) ? 'Stop' : 'Start' }}
+                                </button>
+                                <button
+                                    v-if="isRunning(service)"
+                                    class="btn-service-action btn-restart"
+                                    @click="emit('restart', service)"
+                                    :disabled="pending.has(service.id)"
+                                >
+                                    {{ pending.has(service.id) ? '…' : 'Restart' }}
+                                </button>
+                            </div>
+                            <div class="action-cluster action-cluster-utility">
+                                <button
+                                    v-if="service.resyncable"
+                                    class="btn-service-action btn-resync"
+                                    @click="emit('resync', service)"
+                                    :disabled="pending.has(service.id)"
+                                >
+                                    Resync
+                                </button>
+                                <button class="btn-service-action btn-utility" @click="emit('logs', service.id)" :disabled="pending.has(service.id)">Logs</button>
+                                <button class="btn-service-action btn-utility" @click="emit('edit', service.id)" :disabled="pending.has(service.id)">Edit</button>
+                            </div>
+                        </div>
                         </div>
                         <div class="service-deps" v-if="depsByService[service.id]?.length">
                             <span class="deps-label">connects to</span>
@@ -50,10 +64,12 @@
                             </span>
                         </div>
                         <span class="service-image">
-                            <span class="image-label">config</span>{{ service.config?.image ?? '-' }}
+                            <span class="image-label">config</span>
+                            <span class="image-value">{{ service.config?.image ?? '-' }}</span>
                         </span>
                         <span v-if="service.container?.image" class="service-image">
-                            <span class="image-label">running</span>{{ service.container.image }}
+                            <span class="image-label">running</span>
+                            <span class="image-value">{{ service.container.image }}</span>
                         </span>
                         <span class="service-id">{{ service.id }}</span>
                     </div>
@@ -71,7 +87,7 @@ const props = defineProps({
     services: { type: Array, default: () => [] },
     pending: { type: Object, default: () => new Set() }, // reactive Set of in-flight service ids
 })
-const emit = defineEmits(['toggle', 'restart', 'logs', 'edit'])
+const emit = defineEmits(['toggle', 'restart', 'resync', 'logs', 'edit'])
 
 // The service each id resolves to (for turning a dependency ref into a name + category).
 const serviceById = computed(() => Object.fromEntries(props.services.map((s) => [s.id, s])))
@@ -116,16 +132,24 @@ function isRunning(service) {
 }
 
 .service-card {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    grid-template-rows: auto auto;
-    align-items: center;
+    display: flex;
+    flex-direction: column;
     padding: var(--card-padding);
     background-color: var(--color-background-soft);
     border-radius: var(--radius-xl);
-    gap: var(--space-1) var(--space-3);
+    gap: var(--space-1);
     box-shadow: 0 0 0 0 transparent;
     transition: box-shadow var(--transition-fast);
+}
+
+/* Name + status on the left, action toolbar on the right. Wraps the toolbar to
+   its own line once the card is too narrow to hold both, so nothing overflows. */
+.service-header {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-1);
 }
 /* Ring shown when another card's "connects to" chip points here. */
 .service-card.highlighted {
@@ -134,7 +158,6 @@ function isRunning(service) {
 
 /* Dependency chips: what this service connects to (EC / CC / mev-boost / ...). */
 .service-deps {
-    grid-column: 1 / -1;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -175,14 +198,19 @@ function isRunning(service) {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    grid-column: 1;
-    grid-row: 1;
+    /* Grow to fill the row, but allow shrinking so the toolbar wraps before the
+       card overflows; min-width:0 lets the name truncate instead of forcing width. */
+    flex: 1 1 180px;
+    min-width: 0;
 }
 
 .service-name {
     font-size: var(--font-size-title);
     font-weight: var(--font-weight-semibold);
     color: var(--ev-c-text-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .service-network {
@@ -192,14 +220,32 @@ function isRunning(service) {
     background-color: var(--color-accent-soft);
     color: var(--color-accent);
     font-weight: var(--font-weight-medium);
+    flex-shrink: 0;
 }
+.container-status { flex-shrink: 0; }
 
 .service-actions {
-    grid-column: 2;
-    grid-row: 1;
+    display: flex;
+    align-items: center;
+    /* Push to the right edge when sharing the header line; wrap its own buttons
+       (never overflow) on very narrow cards. */
+    margin-left: auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+/* Two proximity groups: state controls (Start/Stop, Restart) and secondary
+   tools (Resync, Logs, Edit), split by a thin divider so the row reads as one
+   tidy toolbar rather than a ragged line of mixed-color buttons. */
+.action-cluster {
     display: flex;
     gap: var(--space-2);
     align-items: center;
+}
+.action-cluster-utility {
+    margin-left: var(--space-3);
+    padding-left: var(--space-3);
+    border-left: 1px solid var(--ev-c-gray-2);
 }
 
 .btn-service-action {
@@ -209,9 +255,10 @@ function isRunning(service) {
     font-size: var(--font-size-secondary);
     font-weight: var(--font-weight-medium);
     border: 1px solid;
-    transition: background-color var(--transition-fast), opacity var(--transition-fast);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
     white-space: nowrap;
-    min-width: 44px;
+    min-width: 52px;
+    text-align: center;
 }
 .btn-service-action:disabled { opacity: 0.4; cursor: default; }
 
@@ -236,19 +283,27 @@ function isRunning(service) {
 }
 .btn-restart:hover:not(:disabled) { background-color: var(--color-warning-soft); }
 
-.btn-edit {
-    padding: var(--button-padding-small);
+/* Resync is destructive but not a primary state control, so it sits with the
+   secondary tools as a neutral button and only reveals its danger (red) on
+   hover - distinct from Stop, which is always red. The ResyncModal confirms. */
+.btn-resync {
     background-color: transparent;
     color: var(--ev-c-text-2);
-    border: 1px solid var(--ev-c-gray-2);
-    border-radius: var(--radius-md);
-    cursor: pointer;
-    font-size: var(--font-size-secondary);
-    transition: background-color var(--transition-fast), border-color var(--transition-fast);
-    white-space: nowrap;
+    border-color: var(--ev-c-gray-2);
 }
-.btn-edit:hover:not(:disabled) { background-color: var(--ev-c-gray-3); border-color: var(--ev-c-gray-1); }
-.btn-edit:disabled { opacity: 0.4; cursor: default; }
+.btn-resync:hover:not(:disabled) {
+    color: var(--color-danger);
+    border-color: var(--color-danger);
+    background-color: var(--color-danger-soft);
+}
+
+.btn-utility {
+    background-color: transparent;
+    color: var(--ev-c-text-2);
+    border-color: var(--ev-c-gray-2);
+    font-weight: var(--font-weight-normal);
+}
+.btn-utility:hover:not(:disabled) { background-color: var(--ev-c-gray-3); border-color: var(--ev-c-gray-1); }
 
 .container-status {
     display: flex;
@@ -277,10 +332,13 @@ function isRunning(service) {
     font-size: var(--font-size-secondary);
     color: var(--ev-c-text-2);
     font-family: var(--font-mono);
+    min-width: 0;
+}
+.image-value {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    grid-column: 1;
+    min-width: 0;
 }
 
 .image-label {
@@ -300,7 +358,7 @@ function isRunning(service) {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    grid-column: 1 / -1;
+    min-width: 0;
 }
 
 .state-message {

@@ -103,7 +103,7 @@ export function serviceVolumePaths(config) {
 }
 
 /** Wrap a value in single quotes for the shell, escaping embedded single quotes. */
-function shellQuote(s) {
+export function shellQuote(s) {
     return `'${String(s).replace(/'/g, `'"'"'`)}'`
 }
 

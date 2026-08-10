@@ -24,6 +24,7 @@ const NODE_TASK_ACTIONS = {
     'start-service':            { label: () => 'Start service',          run: (node, [id]) => node.startService(id) },
     'stop-service':             { label: () => 'Stop service',           run: (node, [id]) => node.stopService(id) },
     'restart-service':          { label: () => 'Restart service',        run: (node, [id]) => node.restartService(id) },
+    'resync-service':           { label: () => 'Resync service',         run: (node, [id, url = null]) => node.resyncService(id, url) },
     'restart-changed-services': { label: () => 'Restart changed services', run: (node, [scope, prune = true]) => node.restartChangedServices(scope, { prune }) },
     'update-os':                { label: () => 'Update OS',              run: (node) => node.updateOS() },
     'update-package':           { label: ([name]) => `Update ${name}`,   run: (node, [name]) => node.updatePackage(name) },

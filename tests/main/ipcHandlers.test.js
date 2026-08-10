@@ -48,6 +48,7 @@ const { handlers, fakeStorage, fakeNode, fakeNodeManager, fakeTaskManager, fakeW
             startService: vi.fn(),
             stopService: vi.fn(),
             restartService: vi.fn(),
+            resyncService: vi.fn(),
             fetchContainerStatuses: vi.fn(),
             fetchSystemMetrics: vi.fn(),
             fetchClientMetrics: vi.fn(),
@@ -240,6 +241,7 @@ describe('ipcHandlers', () => {
             ['start-service', 'startService', ['s'], ['s']],
             ['stop-service', 'stopService', ['s'], ['s']],
             ['restart-service', 'restartService', ['s'], ['s']],
+            ['resync-service', 'resyncService', ['s', 'https://cp'], ['s', 'https://cp']],
             ['restart-changed-services', 'restartChangedServices', [120, true], [120, { prune: true }]],
             ['update-os', 'updateOS', [], []],
             ['update-package', 'updatePackage', ['curl'], ['curl']],
@@ -256,6 +258,12 @@ describe('ipcHandlers', () => {
                 expect(r).toEqual({ taskId: 'task-123' })
             })
         }
+
+        it('defaults resyncService url to null when only the id is sent', () => {
+            fakeNodeManager.findNode.mockReturnValueOnce(fakeNode)
+            handlers['run-node-task'](event, 'n', 'resync-service', ['s'])
+            expect(fakeNode.resyncService).toHaveBeenCalledWith('s', null)
+        })
 
         it('defaults updateServices to null when no ids are sent', () => {
             fakeNodeManager.findNode.mockReturnValueOnce(fakeNode)

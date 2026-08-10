@@ -6,7 +6,11 @@ import {
     buildDiskBreakdownCommand, parseDiskBreakdown,
     CURL_IMAGE, STEREUM_DOCKER_NETWORK,
     PROMETHEUS_SERVICE, PROMETHEUS_PORT,
+    shellQuote,
 } from "@main/nodes/metrics";
+import {
+    isResyncable, resolveDataDir, isSafeDataDir, updateSyncCommand, supportsCheckpointSync,
+} from "@main/nodes/resync";
 import YAML from 'yaml';
 import { randomUUID } from "crypto";
 import log from 'electron-log';
@@ -86,6 +90,10 @@ export class Node {
                     ...s,
                     container: containerStatuses[s.id] ?? null,
                     setup: su ? { id: su.id, name: su.name, network: su.network, type: su.type, color: su.color } : null,
+                    // Resync capability is a property of the client type (see resync.js) - the
+                    // renderer can't import main-process modules, so surface it on the DTO.
+                    resyncable: isResyncable(s.config),
+                    supportsCheckpoint: supportsCheckpointSync(s.config),
                 }
             }),
         }
@@ -192,6 +200,49 @@ export class Node {
         return this.runPlaybook('manage-service', {
             manage_service: { state: 'restarted', configuration: { id: serviceId } }
         })
+    }
+
+    /**
+     * Wipe a client's chain data and re-sync from scratch. Genesis by default; a checkpointUrl
+     * (consensus clients only) fast-syncs from a trusted source. Composite task op: stop ->
+     * wipe data dir -> (CL) rewrite checkpoint flag + write config -> start.
+     *
+     * Safety: the data dir is resolved from the config and gated by isSafeDataDir BEFORE any
+     * stop/rm/write - an unresolved/unsafe path aborts the whole op (never a partial wipe). The
+     * wipe runs as `sudo sh -c 'rm -rf <dir>/*'` so root expands the glob (root-owned dirs are
+     * unlistable to the SSH user, so a bare `sudo rm -rf <dir>/*` would silently delete nothing).
+     * @param {string} serviceId
+     * @param {string|null} checkpointUrl - CL checkpoint-sync URL; null/empty = genesis sync
+     */
+    async resyncService(serviceId, checkpointUrl = null) {
+        const raw = await this.fetchRawServiceConfig(serviceId)
+        const config = YAML.parse(raw)
+        if (!isResyncable(config)) throw new Error(`Service type ${config?.service ?? '?'} is not resyncable`)
+
+        const dataDir = resolveDataDir(config)
+        const controlsPath = this.settings?.stereum_settings?.settings?.controls_install_path
+        if (!isSafeDataDir(dataDir, { serviceId, controlsPath })) {
+            throw new Error(`Refusing resync: unsafe or unresolved data dir (${dataDir})`)
+        }
+
+        await this.stopService(serviceId)
+
+        // Write the (reversible) config change BEFORE the (irreversible) wipe: if the write
+        // fails, we abort with data still intact rather than wiped-with-a-stale-command.
+        // Consensus clients carry the checkpoint/genesis flag in their command; EL clients
+        // resync from a wipe alone, so their config is left untouched.
+        if (supportsCheckpointSync(config)) {
+            config.command = updateSyncCommand(config.command, config.service, checkpointUrl || null)
+            await this.writeServiceConfig(serviceId, YAML.stringify(config))
+        }
+
+        // Long timeout: deleting a synced client's data (hundreds of GB) runs silent for well
+        // over the 15s idle exec timeout. Same rationale as pruneDocker's timeout override.
+        const wipe = await this.sshService.exec(
+            `sh -c 'rm -rf ${shellQuote(dataDir)}/*'`, true, { timeoutMs: SSHService.PLAYBOOK_TIMEOUT_MS })
+        if (wipe.rc !== 0 && wipe.rc !== null) throw new Error(wipe.stderr || `failed to wipe ${dataDir}`)
+
+        await this.startService(serviceId)
     }
 
     /**

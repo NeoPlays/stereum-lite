@@ -70,6 +70,15 @@ describe('groupServices', () => {
         expect(groups[0].categories[0].key).toBe('execution')
     })
 
+    it('puts a name-tagged commonServices setup last even when its type is unset', () => {
+        const shared = { id: 'setup-shared', name: 'commonServices', network: 'default', type: null }
+        const groups = groupServices([
+            svc('c1', 'PrometheusService', shared),
+            svc('e1', 'GethService', eth),
+        ])
+        expect(groups.map((g) => g.setup.id)).toEqual(['setup-eth', 'setup-shared'])
+    })
+
     it('sorts real setups by name', () => {
         const b = { id: 's-b', name: 'bravo', type: 'ETH' }
         const a = { id: 's-a', name: 'alpha', type: 'ETH' }

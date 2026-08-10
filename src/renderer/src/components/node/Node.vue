@@ -71,6 +71,7 @@
                 :pending="pending"
                 @toggle="toggleService"
                 @restart="restartService"
+                @resync="openResync"
                 @logs="viewLogs"
                 @edit="editService"
             />
@@ -79,6 +80,8 @@
 
             <ValidatorsTab v-show="activeTab === 'validators'" :services="nodeData.services" />
         </template>
+
+        <ResyncModal v-if="resyncTarget" :service="resyncTarget" @close="resyncTarget = null" @confirm="confirmResync" />
     </div>
 </template>
 
@@ -92,6 +95,7 @@ import NodeMetrics from './NodeMetrics.vue'
 import ServicesTab from './ServicesTab.vue'
 import UpdatesTab from './UpdatesTab.vue'
 import ValidatorsTab from './ValidatorsTab.vue'
+import ResyncModal from './ResyncModal.vue'
 const router = useRouter()
 const route = useRoute()
 const store = useNodesStore()
@@ -190,6 +194,26 @@ async function restartService(service) {
     pending.add(serviceId)
     try {
         const taskId = await tasks.runNodeTask(route.params.id, 'restart-service', [serviceId])
+        await tasks.awaitTask(taskId)
+        await refreshContainerStatuses()
+    } finally {
+        pending.delete(serviceId)
+    }
+}
+
+// Resync opens a confirm modal first (it wipes chain data); confirmResync runs the task.
+const resyncTarget = ref(null)
+function openResync(service) {
+    resyncTarget.value = service
+}
+async function confirmResync(checkpointUrl) {
+    const service = resyncTarget.value
+    resyncTarget.value = null
+    if (!service) return
+    const serviceId = service.id
+    pending.add(serviceId)
+    try {
+        const taskId = await tasks.runNodeTask(route.params.id, 'resync-service', [serviceId, checkpointUrl ?? null])
         await tasks.awaitTask(taskId)
         await refreshContainerStatuses()
     } finally {
