@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { classifyValidatorSetup, isSoloEligible } from '@renderer/utils/validatorSetup'
+import { classifyValidatorSetup, isSoloEligible, holdsOnChainValidators } from '@renderer/utils/validatorSetup'
 
 const svc = (id, service) => ({ id, config: { service } })
 
@@ -69,5 +69,20 @@ describe('isSoloEligible', () => {
     it('is true only for solo setups (slashing gate S4)', () => {
         expect(isSoloEligible('solo')).toBe(true)
         for (const k of ['remote-signer', 'obol', 'ssv', 'none']) expect(isSoloEligible(k)).toBe(false)
+    })
+})
+
+describe('holdsOnChainValidators', () => {
+    it('Charon DV pubkeys and solo/remote-signer keys are on-chain', () => {
+        expect(holdsOnChainValidators('distributed', 'obol')).toBe(true)
+        expect(holdsOnChainValidators('validator', 'solo')).toBe(true)
+        expect(holdsOnChainValidators('signer', 'remote-signer')).toBe(true)
+    })
+    it('key shares behind Charon (VC or Web3Signer) are NOT on-chain', () => {
+        expect(holdsOnChainValidators('share', 'obol')).toBe(false)
+        expect(holdsOnChainValidators('signer', 'obol')).toBe(false)
+    })
+    it('SSV is off-node', () => {
+        expect(holdsOnChainValidators('ssv', 'ssv')).toBe(false)
     })
 })

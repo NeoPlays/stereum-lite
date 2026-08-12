@@ -10,6 +10,10 @@
                     <h1 class="page-title">Validator keys</h1>
                 </div>
                 <div class="header-actions">
+                    <button class="btn-ghost" @click="openBeaconModal" :title="beaconUrl || `Using this node's beacon`">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M12 3a9 9 0 0 1 0 18M12 3a9 9 0 0 0 0 18" /></svg>
+                        Stats beacon<span v-if="beaconUrl" class="src-dot"></span>
+                    </button>
                     <button class="btn-ghost" :disabled="st.loading" @click="refresh">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5" /></svg>
                         Refresh
@@ -43,6 +47,9 @@
                     </template>
                 </div>
 
+                <div v-else-if="st.loading && !st.keys.length" class="notice muted">Reading validator keys from the client…</div>
+                <div v-else-if="st.error" class="notice error">{{ st.error }}</div>
+
                 <template v-else>
                     <!-- Facet cards -->
                     <div class="facets">
@@ -50,16 +57,22 @@
                             v-for="f in FACETS"
                             :key="f.key"
                             class="facet"
-                            :class="{ active: filter === f.key, disabled: f.key !== 'All' && !statusKnown }"
-                            :disabled="f.key !== 'All' && !statusKnown"
+                            :class="{ active: filter === f.key, disabled: facetDisabled(f) }"
+                            :disabled="facetDisabled(f)"
                             @click="setFilter(f.key)"
                         >
                             <span class="facet-top">
                                 <span v-if="f.color" class="dot" :style="{ background: f.color }"></span>
                                 <span class="facet-label">{{ f.label }}</span>
                             </span>
-                            <span class="facet-count mono" :style="f.key === 'Slashed' && counts.Slashed > 0 ? { color: 'var(--color-danger)' } : null">{{ countText(counts[f.key]) }}</span>
+                            <span class="facet-count mono" :style="f.key === 'Slashed' && counts.Slashed > 0 ? { color: 'var(--color-danger)' } : null">{{ facetCount(f) }}</span>
                         </button>
+                    </div>
+
+                    <div v-if="statsLoading || statsError || st.statesSource === 'custom'" class="stats-line" :class="{ error: !!statsError }">
+                        <template v-if="statsLoading">Loading validator stats from the beacon…</template>
+                        <template v-else-if="statsError">{{ statsError }}</template>
+                        <template v-else>Stats read from a custom beacon URL</template>
                     </div>
 
                     <!-- Table card -->
@@ -119,6 +132,7 @@
                             :selected="selected"
                             :header-state="headerState"
                             :row-actions="capability.rowActions"
+                            :stats-applicable="statsApplicable"
                             :network="network"
                             :page="pageClamped"
                             :pages="pages"
@@ -152,12 +166,34 @@
             @close="detail = null"
             @action="onDrawerAction"
         />
+
+        <Teleport to="body">
+            <div v-if="beaconModal" class="modal-overlay" @click.self="beaconModal = false">
+                <div class="beacon-modal">
+                    <header class="bm-head">
+                        <h3 class="bm-title">Stats beacon source</h3>
+                        <button class="icon-btn" aria-label="Close" @click="beaconModal = false">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                        </button>
+                    </header>
+                    <div class="bm-body">
+                        <p class="bm-hint">Which beacon node validator stats are read from. Leave empty to use this node's own beacon (the connected node's first running consensus client).</p>
+                        <p class="bm-hint bm-warn">Your validator public keys are sent to this URL to look up their on-chain state. Pubkeys are public data, but a third-party endpoint could correlate them to this node - use a beacon you trust.</p>
+                        <input v-model="beaconDraft" class="bm-input mono" type="text" placeholder="http://host:5052  (empty = this node's beacon)" autocomplete="off" spellcheck="false" @keydown.enter="saveBeacon" />
+                    </div>
+                    <footer class="bm-foot">
+                        <button class="btn-ghost" @click="beaconModal = false">Cancel</button>
+                        <button class="btn-accent" @click="saveBeacon">Save</button>
+                    </footer>
+                </div>
+            </div>
+        </Teleport>
     </div>
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
-import { classifyValidatorSetup, SOLO_VC_TYPES } from '@renderer/utils/validatorSetup'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { classifyValidatorSetup, SOLO_VC_TYPES, holdsOnChainValidators } from '@renderer/utils/validatorSetup'
 import { capabilityFor, explorerUrl } from '@renderer/utils/validatorCapabilities'
 import { useValidatorKeys } from '@renderer/composables/useValidatorKeys'
 import ValidatorTable from './validators/ValidatorTable.vue'
@@ -213,13 +249,26 @@ const holders = computed(() => {
         for (const s of grp.services) {
             const role = roleOf(s, cls.kind)
             if (!role) continue
-            out.push({ key: s.id, service: s, kind: cls.kind, role, setup: grp.setup, listable: Boolean(s.validatorListable) })
+            out.push({
+                key: s.id, service: s, kind: cls.kind, role, setup: grp.setup,
+                listable: Boolean(s.validatorListable),
+                // Share pubkeys (VC/Web3Signer behind Charon) have no on-chain stats.
+                onChainStats: holdsOnChainValidators(role, cls.kind),
+            })
         }
     }
     return out
 })
 
-const { load, state } = useValidatorKeys(() => props.nodeId)
+const { load, loadStates, state } = useValidatorKeys(() => props.nodeId)
+
+// Per-node "stats beacon" override (empty = the node's own beacon). Persisted in electron-store.
+const beaconUrl = ref('')
+const beaconModal = ref(false)
+const beaconDraft = ref('')
+onMounted(async () => {
+    try { beaconUrl.value = (await window.api.invoke('store-get', `statsBeaconUrl:${props.nodeId}`)) || '' } catch { /* default: node's beacon */ }
+})
 
 // --- State ---
 const activeKey = ref(null)
@@ -242,14 +291,27 @@ const activeService = computed(() => activeHolder.value?.service || null)
 const network = computed(() => activeService.value?.config?.network || '')
 const st = computed(() => (activeService.value ? state(activeService.value.id) : { loading: false, keys: [], error: '' }))
 const capability = computed(() => capabilityFor(activeHolder.value?.role, shortName(activeService.value)))
+// Share holders (VC/Web3Signer behind Charon) never have on-chain stats -> status/balance/etc. are n/a.
+const statsApplicable = computed(() => Boolean(activeHolder.value?.onChainStats))
 
-// Slice 0: rows are pubkeys with placeholder enrichment fields (merged in later slices).
-const rows = computed(() => st.value.keys.map((k) => ({
-    pubkey: k.pubkey, readonly: k.readonly,
-    index: null, status: null, balance: null, effectiveBalance: null,
-    withdrawalType: null, activationEpoch: null, feeRecipient: null, graffiti: null,
-})))
+// Rows = keys merged with on-chain beacon state (by lowercased pubkey). Fee recipient / graffiti
+// come in a later slice; missing fields stay null and render as "-".
+const rows = computed(() => {
+    const states = st.value.states || {}
+    return st.value.keys.map((k) => {
+        const s = states[String(k.pubkey || '').toLowerCase()] || null
+        return {
+            pubkey: k.pubkey, readonly: k.readonly,
+            index: s?.index ?? null, status: s?.status ?? null, slashed: s?.slashed ?? false,
+            balance: s?.balance ?? null, effectiveBalance: s?.effectiveBalance ?? null,
+            withdrawalType: s?.withdrawalType ?? null, activationEpoch: s?.activationEpoch ?? null,
+            feeRecipient: null, graffiti: null,
+        }
+    })
+})
 const statusKnown = computed(() => rows.value.some((r) => r.status))
+const statsLoading = computed(() => Boolean(st.value.statesLoading))
+const statsError = computed(() => st.value.statesError || '')
 
 const visible = computed(() => {
     const q = queryD.value.toLowerCase()
@@ -317,6 +379,12 @@ function countFor(h) {
     return h.key === activeKey.value || s.keys.length ? String(s.keys.length) : (h.listable ? '·' : '—')
 }
 function countText(v) { return v == null ? '—' : String(v) }
+function facetDisabled(f) { return f.key !== 'All' && (!statsApplicable.value || !statusKnown.value) }
+function facetCount(f) {
+    if (f.key === 'All') return countText(counts.value.All)
+    if (!statsApplicable.value) return 'n/a'
+    return countText(counts.value[f.key])
+}
 
 // --- Actions ---
 function selectService(h) {
@@ -326,9 +394,23 @@ function selectService(h) {
     chips.cred01 = chips.feeSet = chips.missingGraffiti = false
     selected.clear(); allMatching.value = false
     scope.value = 'all'; page.value = 1; detail.value = null
-    if (h.listable) load(h.service.id)
+    if (h.listable) load(h.service.id).then(() => enrich(h))
 }
-function refresh() { if (activeService.value) load(activeService.value.id, { force: true }) }
+function refresh() { if (activeHolder.value) load(activeHolder.value.service.id, { force: true }).then(() => enrich(activeHolder.value)) }
+
+// On-chain holders (solo VC keys, Charon DV pubkeys) get beacon-state enrichment; shares don't.
+function enrich(h) {
+    if (!h?.onChainStats) return
+    const keys = state(h.service.id).keys
+    if (keys?.length) loadStates(h.service.id, keys.map((k) => k.pubkey), beaconUrl.value)
+}
+function openBeaconModal() { beaconDraft.value = beaconUrl.value; beaconModal.value = true }
+async function saveBeacon() {
+    beaconUrl.value = beaconDraft.value.trim()
+    beaconModal.value = false
+    try { await window.api.invoke('store-set', `statsBeaconUrl:${props.nodeId}`, beaconUrl.value) } catch { /* non-fatal */ }
+    enrich(activeHolder.value) // re-read stats from the new source
+}
 function setFilter(key) { if (key !== 'All' && !statusKnown.value) return; filter.value = key; page.value = 1 }
 function toggleChip(key) { if (!statusKnown.value) return; chips[key] = !chips[key]; page.value = 1 }
 function setSize(s) { size.value = s; page.value = 1 }
@@ -476,9 +558,29 @@ watch(() => props.active, (isActive) => {
 /* Notices */
 .notice { font-size: var(--font-size-secondary); color: var(--ev-c-text-2); line-height: 1.6; padding: var(--space-4); background-color: var(--color-background-soft); border: 1px solid var(--ev-c-gray-3); border-radius: var(--radius-xl); }
 .notice.info { display: flex; gap: var(--space-3); }
+.notice.muted { color: var(--ev-c-text-3); }
+.notice.error { color: var(--color-danger); border-color: var(--color-danger-border); }
 .info-icon { color: var(--color-warning); flex-shrink: 0; margin-top: 2px; }
 .service-note span { max-width: 92ch; }
 .notice-sub { display: block; margin-top: var(--space-2); font-size: var(--font-size-meta); color: var(--ev-c-text-3); }
 
 .state-message { color: var(--ev-c-text-2); font-size: var(--font-size-body); text-align: center; padding: var(--space-9); }
+
+.src-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); margin-left: 2px; }
+.stats-line { font-size: var(--font-size-meta); color: var(--ev-c-text-3); padding: 0 var(--space-1); }
+.stats-line.error { color: var(--color-danger); }
+
+/* Stats-beacon modal */
+.modal-overlay { position: fixed; inset: 0; z-index: 320; background-color: var(--scrim); display: flex; align-items: center; justify-content: center; padding: var(--space-8); }
+.beacon-modal { display: flex; flex-direction: column; width: min(480px, 92vw); background-color: var(--color-background-soft); border: 1px solid var(--ev-c-gray-3); border-radius: var(--radius-xl); overflow: hidden; }
+.bm-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--ev-c-gray-3); }
+.bm-title { font-size: var(--font-size-title); font-weight: var(--font-weight-semibold); color: var(--ev-c-text-1); }
+.icon-btn { flex-shrink: 0; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; background: transparent; border: none; border-radius: var(--radius-md); color: var(--ev-c-text-2); cursor: pointer; transition: background-color var(--transition-fast); }
+.icon-btn:hover { background-color: var(--ev-c-gray-3); }
+.bm-body { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); }
+.bm-hint { font-size: var(--font-size-secondary); color: var(--ev-c-text-2); line-height: 1.5; }
+.bm-warn { font-size: var(--font-size-meta); color: var(--ev-c-text-3); }
+.bm-input { padding: var(--button-padding); background-color: var(--color-background-mute); border: 1px solid var(--ev-c-gray-2); border-radius: var(--radius-md); color: var(--ev-c-text-1); font-size: var(--font-size-secondary); outline: none; }
+.bm-input:focus { border-color: var(--color-accent); }
+.bm-foot { display: flex; justify-content: flex-end; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-top: 1px solid var(--ev-c-gray-3); }
 </style>

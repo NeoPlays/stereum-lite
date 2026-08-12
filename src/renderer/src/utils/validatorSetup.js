@@ -61,3 +61,20 @@ export function classifyValidatorSetup(services = []) {
 export function isSoloEligible(kind) {
     return kind === 'solo'
 }
+
+/**
+ * Whether a holder's pubkeys are REAL on-chain validators - i.e. they have beacon-chain
+ * stats (status/balance/withdrawal/index). Charon's cluster-lock distributed-validator
+ * pubkeys and a solo VC's (or a plain remote-signer's) keys are on-chain. The key SHARES a
+ * VC or Web3Signer holds BEHIND Charon are not - a share pubkey never appears on-chain, so
+ * beacon queries return nothing. Slice 1 uses this to enrich only on-chain holders and mark
+ * shares as n/a. (Charon's own cluster/peer health comes separately from Prometheus.)
+ * @param {'validator'|'share'|'distributed'|'signer'|'ssv'} role
+ * @param {'solo'|'remote-signer'|'obol'|'ssv'} kind
+ */
+export function holdsOnChainValidators(role, kind) {
+    if (role === 'distributed') return true   // Charon DV pubkeys are on-chain validators
+    if (role === 'ssv') return false          // registered/managed off-node
+    if (kind === 'obol') return false         // VC / Web3Signer behind Charon hold key shares only
+    return role === 'validator' || role === 'signer'
+}

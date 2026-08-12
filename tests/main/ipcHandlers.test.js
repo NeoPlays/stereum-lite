@@ -128,6 +128,7 @@ describe('ipcHandlers', () => {
             'get-system-metrics',
             'get-tasks',
             'get-upgradable-packages',
+            'get-validator-states',
             'import-server-from-stereum',
             'list-validators',
             'pick-private-key-file',

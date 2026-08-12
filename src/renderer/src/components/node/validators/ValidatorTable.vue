@@ -33,13 +33,16 @@
                 <div class="cell cell-index mono">{{ row.index ?? '—' }}</div>
                 <div class="cell cell-key mono">{{ shortKey(row.pubkey) }}</div>
                 <div class="cell cell-status">
-                    <span class="dot" :style="{ background: STATUS_COLOR[row.status] || 'var(--ev-c-gray-1)' }"></span>
-                    <span :style="{ color: STATUS_COLOR[row.status] || 'var(--ev-c-text-3)' }">{{ STATUS_LABEL[row.status] || '—' }}</span>
+                    <template v-if="statsApplicable">
+                        <span class="dot" :style="{ background: STATUS_COLOR[row.status] || 'var(--ev-c-gray-1)' }"></span>
+                        <span :style="{ color: STATUS_COLOR[row.status] || 'var(--ev-c-text-3)' }">{{ STATUS_LABEL[row.status] || '—' }}</span>
+                    </template>
+                    <span v-else class="muted">n/a</span>
                 </div>
-                <div class="cell cell-right cell-balance mono">{{ row.balance != null ? Number(row.balance).toFixed(3) : '—' }}</div>
+                <div class="cell cell-right cell-balance mono" :class="{ muted: !statsApplicable }">{{ !statsApplicable ? 'n/a' : (row.balance != null ? Number(row.balance).toFixed(3) : '—') }}</div>
                 <div class="cell cell-withdrawal">
-                    <span v-if="row.withdrawalType" class="wpill mono" :class="{ warn: row.withdrawalType === '0x01' || row.withdrawalType === '0x00' }">{{ row.withdrawalType }}</span>
-                    <span v-else class="mono muted">—</span>
+                    <span v-if="statsApplicable && row.withdrawalType" class="wpill mono" :class="{ warn: row.withdrawalType === '0x01' || row.withdrawalType === '0x00' }">{{ row.withdrawalType }}</span>
+                    <span v-else class="mono muted">{{ statsApplicable ? '—' : 'n/a' }}</span>
                 </div>
                 <div class="cell cell-right cell-actions" @click.stop>
                     <button class="iconbtn" title="Copy pubkey" @click="emit('copy', row)">
@@ -105,6 +108,7 @@ const props = defineProps({
     selected: { type: Object, required: true }, // Set<pubkey>
     headerState: { type: String, default: 'none' }, // 'none' | 'some' | 'all'
     rowActions: { type: Array, default: () => [] },
+    statsApplicable: { type: Boolean, default: true },
     network: { type: String, default: '' },
     page: { type: Number, default: 1 },
     pages: { type: Number, default: 1 },
@@ -168,7 +172,7 @@ onUnmounted(closeMenu)
 
 .vrow {
     display: grid;
-    grid-template-columns: 38px 62px minmax(0, 1fr) 120px 118px 138px 96px;
+    grid-template-columns: 38px 84px minmax(0, 1fr) 120px 118px 138px 96px;
     align-items: center;
 }
 .vhead {
@@ -196,7 +200,7 @@ onUnmounted(closeMenu)
 .cell-right { text-align: right; justify-self: end; }
 .cell-balance { padding-right: 18px; }
 .cell-check { display: flex; align-items: center; justify-content: center; }
-.cell-index { color: var(--ev-c-text-3); }
+.cell-index { color: var(--ev-c-text-3); overflow: visible; text-overflow: clip; }
 .cell-key { color: var(--ev-c-text-1); }
 .cell-status { display: flex; align-items: center; gap: var(--space-2); }
 .cell-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; }

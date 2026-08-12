@@ -288,6 +288,17 @@ export function initializeIpcHandlers() {
         }
     });
 
+    ipcMain.handle('get-validator-states', async (_, nodeId, pubkeys, beaconUrl) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.getValidatorStates(pubkeys, { beaconUrl })
+        } catch (error) {
+            log.error('get-validator-states error:', error)
+            return { ok: false, error: error.message || 'get-validator-states failed', states: {} }
+        }
+    });
+
     ipcMain.handle('check-checkpoint-sync', async (_, nodeId, url) => {
         try {
             const node = nodeManager.findNode(nodeId)

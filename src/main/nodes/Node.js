@@ -6,8 +6,9 @@ import {
     buildDiskBreakdownCommand, parseDiskBreakdown,
     CURL_IMAGE, STEREUM_DOCKER_NETWORK,
     PROMETHEUS_SERVICE, PROMETHEUS_PORT,
-    shellQuote,
+    CLIENT_REGISTRY, shellQuote,
 } from "@main/nodes/metrics";
+import { normalizeBeaconUrl, buildBeaconValidatorsScript, parseBeaconStates } from "@main/nodes/beaconValidators";
 import {
     isResyncable, resolveDataDir, isSafeDataDir, updateSyncCommand, supportsCheckpointSync,
 } from "@main/nodes/resync";
@@ -324,6 +325,48 @@ export class Node {
         const { httpCode, body } = parseKeymanagerResponse(res.stdout)
         if (httpCode !== 200) return { ok: false, error: httpCode ? `Keymanager HTTP ${httpCode}` : 'Client API unreachable (running?)', httpCode, keys: [] }
         return { ok: true, keys: parseKeystoresList(body) }
+    }
+
+    /** Base URL of the first running consensus client's beacon REST API (`stereum-<id>:<port>`), or null. */
+    async _resolveInternalBeaconBase() {
+        if (!this.services?.length) await this.fetchServices()
+        if (this.services.some(s => !s.config)) await this.fetchServiceConfigs()
+        const containers = await this.fetchContainerStatuses()
+        for (const s of this.services) {
+            const reg = CLIENT_REGISTRY[s.config?.service]
+            if (reg?.role === 'consensus' && containers[s.id]?.state === 'running') {
+                return `http://stereum-${s.id}:${reg.port}`
+            }
+        }
+        return null
+    }
+
+    /**
+     * On-chain state for a set of validator pubkeys via the beacon REST API
+     * (`POST /eth/v1/beacon/states/head/validators`, chunked, one curl sidecar). On-chain state
+     * is global, so ANY synced beacon answers for any pubkey - by default the node's own first
+     * running consensus client, or a user-set stats-beacon URL override. Read-only.
+     * @param {string[]} pubkeys - 0x validator pubkeys (solo VC keys or Charon DV pubkeys)
+     * @param {{ beaconUrl?: string }} opts - beaconUrl overrides the node's own beacon
+     * @returns {Promise<{ ok, states: { [pubkey]: object }, source?: 'custom'|'node', error? }>}
+     */
+    async getValidatorStates(pubkeys, { beaconUrl } = {}) {
+        const override = beaconUrl ? normalizeBeaconUrl(beaconUrl) : null
+        if (beaconUrl && !override) return { ok: false, error: 'Invalid beacon URL', states: {} }
+        const base = override || await this._resolveInternalBeaconBase()
+        if (!base) return { ok: false, error: 'No stats beacon set and no running consensus client on this node', states: {} }
+        const script = buildBeaconValidatorsScript(base, pubkeys)
+        if (!script) return { ok: true, states: {}, source: override ? 'custom' : 'node' } // no valid pubkeys
+        const res = await this.sshService.exec(wrapSidecar(script), true, { timeoutMs: 30_000 })
+        if (res.rc !== 0 && res.rc !== null) return { ok: false, error: 'Beacon query failed (is the beacon reachable?)', states: {} }
+        // res.rc is the trailing printf's status, never curl's - so detect failure from the per-chunk
+        // HTTP codes: if every chunk returned non-2xx (incl. 000 = never connected), surface an error.
+        const { states, codes } = parseBeaconStates(res.stdout)
+        if (codes.length && !codes.some((c) => c >= 200 && c < 300)) {
+            const c = codes[0]
+            return { ok: false, error: c > 0 ? `Beacon returned HTTP ${c}` : 'Beacon unreachable or timed out', states: {} }
+        }
+        return { ok: true, states, source: override ? 'custom' : 'node' }
     }
 
     /**
