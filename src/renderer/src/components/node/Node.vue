@@ -78,7 +78,7 @@
 
             <UpdatesTab v-show="activeTab === 'updates'" :node-data="nodeData" @refresh="() => load(true)" />
 
-            <ValidatorsTab v-show="activeTab === 'validators'" :services="nodeData.services" />
+            <ValidatorsTab v-show="activeTab === 'validators'" :services="nodeData.services" :node-id="route.params.id" :active="activeTab === 'validators'" />
         </template>
 
         <ResyncModal v-if="resyncTarget" :service="resyncTarget" :node-id="route.params.id" @close="resyncTarget = null" @confirm="confirmResync" />
@@ -120,7 +120,7 @@ const tabs = [
     { id: 'services', label: 'Services' },
     { id: 'metrics', label: 'Metrics' },
     { id: 'updates', label: 'Updates' },
-    { id: 'validators', label: 'Validators', disabled: true },
+    { id: 'validators', label: 'Validators' },
 ]
 const activeTab = ref('services')
 

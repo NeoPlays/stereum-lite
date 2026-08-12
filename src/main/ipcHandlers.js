@@ -277,6 +277,17 @@ export function initializeIpcHandlers() {
         return result.filePaths[0]
     });
 
+    ipcMain.handle('list-validators', async (_, nodeId, serviceId) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.listValidators(serviceId)
+        } catch (error) {
+            log.error('list-validators error:', error)
+            return { ok: false, error: error.message || 'list-validators failed', keys: [] }
+        }
+    });
+
     ipcMain.handle('check-checkpoint-sync', async (_, nodeId, url) => {
         try {
             const node = nodeManager.findNode(nodeId)

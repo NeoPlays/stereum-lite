@@ -46,6 +46,14 @@
     --color-warning:      #e5c07b;
     --color-warning-soft: rgba(229, 192, 123, 0.10);
 
+    /* Alpha-on-accent washes distinct from --color-accent-soft (~.13). Used by the dense
+       validator table: selected-row bg + the "All keys" scope-bar tint/border. */
+    --color-accent-wash:   rgba(148, 197, 204, 0.06);
+    --color-accent-border: rgba(148, 197, 204, 0.28);
+    --color-danger-border: rgba(224, 108, 117, 0.30);   /* destructive-button outline */
+    --scrim:               rgba(6, 7, 8, 0.55);          /* drawer + dialog overlay */
+    --shadow-menu:         0 18px 40px rgba(0, 0, 0, 0.55); /* floating row-action menu */
+
     /* Categorical chart palette - for encoding distinct entities (e.g. per-service
        disk segments). Fixed order, assigned by slot, never cycled. Validated for
        colour-blind separation (worst adjacent ΔE ≥ 12) against the card surface in
@@ -138,6 +146,13 @@
     --color-danger-soft:  rgba(239, 115, 99, 0.14);
     --color-warning:      #e6b148;
     --color-warning-soft: rgba(230, 177, 72, 0.14);
+
+    /* Light-theme equivalents (accent hue differs, so alpha-on-accent can't be shared). */
+    --color-accent-wash:   rgba(90, 163, 173, 0.08);
+    --color-accent-border: rgba(90, 163, 173, 0.32);
+    --color-danger-border: rgba(239, 115, 99, 0.32);
+    --scrim:               rgba(15, 17, 20, 0.35);
+    --shadow-menu:         0 18px 40px rgba(0, 0, 0, 0.18);
 
     /* Light-mode categorical steps - same hues stepped for the light surface. */
     --chart-1: #2a78d6;

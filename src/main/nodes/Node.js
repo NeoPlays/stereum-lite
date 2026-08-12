@@ -12,6 +12,12 @@ import {
     isResyncable, resolveDataDir, isSafeDataDir, updateSyncCommand, supportsCheckpointSync,
 } from "@main/nodes/resync";
 import { buildCheckpointProbeScript, parseCheckpointResult } from "@main/nodes/checkpoint";
+import {
+    keymanagerInfo, keymanagerTarget, buildKeymanagerScript, wrapSidecar,
+    buildTokenReadCommand, parseToken, buildWeb3SignerScript,
+    parseKeymanagerResponse, parseKeystoresList, parseWeb3SignerPubkeys, validatorListable,
+} from "@main/nodes/keymanager";
+import { buildClusterLockReadCommand, parseClusterLock } from "@main/nodes/dvt";
 import YAML from 'yaml';
 import { randomUUID } from "crypto";
 import log from 'electron-log';
@@ -95,6 +101,13 @@ export class Node {
                     // renderer can't import main-process modules, so surface it on the DTO.
                     resyncable: isResyncable(s.config),
                     supportsCheckpoint: supportsCheckpointSync(s.config),
+                    // Validators tab: whether this service answers a keymanager-style read
+                    // (the 5 VCs with the API flag on, + Web3Signer). reason = 'api-not-enabled'
+                    // lets the UI explain a known client whose keymanager flag is off.
+                    ...(() => { const km = keymanagerInfo(s.config); return { keymanagerCapable: km.capable, keymanagerReason: km.reason } })(),
+                    // Whether the Validators tab can list keys for this service (keymanager API
+                    // or Obol's cluster-lock.json). SSV lists via an external API - not yet wired.
+                    validatorListable: validatorListable(s.config),
                 }
             }),
         }
@@ -261,6 +274,56 @@ export class Node {
         const cmd = `docker run --rm --entrypoint sh ${CURL_IMAGE} -c '${escaped}'`
         const response = await this.sshService.exec(cmd, true, { timeoutMs: 20_000 })
         return parseCheckpointResult(response.stdout)
+    }
+
+    /**
+     * List the validator keys a client is signing for, via the standard Keymanager REST API
+     * over a curl sidecar (matches stereum's ValidatorAccountManager). Web3Signer is listed via
+     * its own pubkeys endpoint. Read-only. Returns `{ ok, keys:[{pubkey,readonly,derivationPath?}] }`
+     * or a soft error object (never throws) so the tab can render a reason instead of a blank.
+     *
+     * NOTE (v1): the bearer token is passed on the sidecar's curl command line (as stereum does),
+     * so it is briefly visible in the host process list - acceptable for a read, revisit for writes.
+     * @param {string} serviceId - the key-holding service (a *ValidatorService or Web3SignerService)
+     */
+    async listValidators(serviceId) {
+        const raw = await this.fetchRawServiceConfig(serviceId)
+        const config = YAML.parse(raw)
+
+        // Obol: the real distributed-validator pubkeys come from Charon's cluster-lock.json
+        // (read off the host), NOT the VC's share keystores. Matches stereum's getDVTKeys.
+        if (config.service === 'CharonService') {
+            const cmd = buildClusterLockReadCommand(config)
+            if (!cmd) return { ok: false, error: 'Could not resolve the Charon data directory', keys: [] }
+            const res = await this.sshService.exec(cmd)
+            if (res.rc !== 0 && res.rc !== null) return { ok: false, error: 'Could not read cluster-lock.json (is the cluster set up?)', keys: [] }
+            return { ok: true, keys: parseClusterLock(res.stdout) }
+        }
+
+        const info = keymanagerInfo(config)
+        if (!info.capable) return { ok: false, reason: info.reason || 'unsupported', keys: [] }
+
+        // Web3Signer: no bearer token, its own /api/v1/eth2/publicKeys endpoint.
+        if (info.web3signer) {
+            const res = await this.sshService.exec(wrapSidecar(buildWeb3SignerScript(serviceId)), true, { timeoutMs: 20_000 })
+            const { httpCode, body } = parseKeymanagerResponse(res.stdout)
+            if (httpCode !== 200) return { ok: false, error: httpCode ? `Web3Signer HTTP ${httpCode}` : 'Web3Signer unreachable', httpCode, keys: [] }
+            return { ok: true, keys: parseWeb3SignerPubkeys(body) }
+        }
+
+        // Validator client: read the bearer token, then GET /eth/v1/keystores.
+        const tokenCmd = buildTokenReadCommand({ id: serviceId, config })
+        if (!tokenCmd) return { ok: false, error: 'Could not resolve the keymanager token path', keys: [] }
+        const tokenRes = await this.sshService.exec(tokenCmd)
+        if (tokenRes.rc !== 0 && tokenRes.rc !== null) return { ok: false, error: 'Could not read the keymanager token (is the client running?)', keys: [] }
+        const token = parseToken(config.service, tokenRes.stdout)
+
+        const target = keymanagerTarget(config)
+        const script = buildKeymanagerScript({ serviceId, ...target, method: 'GET', path: '/eth/v1/keystores', token })
+        const res = await this.sshService.exec(wrapSidecar(script), true, { timeoutMs: 20_000 })
+        const { httpCode, body } = parseKeymanagerResponse(res.stdout)
+        if (httpCode !== 200) return { ok: false, error: httpCode ? `Keymanager HTTP ${httpCode}` : 'Client API unreachable (running?)', httpCode, keys: [] }
+        return { ok: true, keys: parseKeystoresList(body) }
     }
 
     /**
