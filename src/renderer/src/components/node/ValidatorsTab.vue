@@ -149,12 +149,6 @@
                             @next="page = Math.min(pages, pageClamped + 1)"
                         />
                     </div>
-
-                    <!-- Service note -->
-                    <div v-if="capability.note" class="notice info service-note">
-                        <svg class="info-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 7.5v.5" /></svg>
-                        <span>{{ capability.note }}</span>
-                    </div>
                 </template>
             </template>
         </template>
@@ -560,8 +554,6 @@ watch(() => props.active, (isActive) => {
 .notice.info { display: flex; gap: var(--space-3); }
 .notice.muted { color: var(--ev-c-text-3); }
 .notice.error { color: var(--color-danger); border-color: var(--color-danger-border); }
-.info-icon { color: var(--color-warning); flex-shrink: 0; margin-top: 2px; }
-.service-note span { max-width: 92ch; }
 .notice-sub { display: block; margin-top: var(--space-2); font-size: var(--font-size-meta); color: var(--ev-c-text-3); }
 
 .state-message { color: var(--ev-c-text-2); font-size: var(--font-size-body); text-align: center; padding: var(--space-9); }
