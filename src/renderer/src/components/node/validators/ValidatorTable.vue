@@ -102,9 +102,12 @@
 
 <script setup>
 import { ref, watch, onUnmounted } from 'vue'
+import { actionDisabled, actionHint } from '@renderer/utils/validatorCapabilities'
 
 const props = defineProps({
     rows: { type: Array, default: () => [] },
+    soloEligible: { type: Boolean, default: false },
+    graffitiSupported: { type: Boolean, default: true },
     selected: { type: Object, required: true }, // Set<pubkey>
     headerState: { type: String, default: 'none' }, // 'none' | 'some' | 'all'
     rowActions: { type: Array, default: () => [] },
@@ -124,14 +127,11 @@ const STATUS_LABEL = { Active: 'Active', Pending: 'Pending', Exited: 'Exited', S
 function shortKey(pubkey) {
     return pubkey && pubkey.length > 20 ? `${pubkey.slice(0, 10)}…${pubkey.slice(-8)}` : pubkey
 }
-function isDisabled(a) {
-    return Boolean(a.disabled || a.mutating || (a.needsIndex && menuRow.value?.index == null))
+function gateCtx() {
+    return { row: menuRow.value, soloEligible: props.soloEligible, graffitiSupported: props.graffitiSupported }
 }
-function hintFor(a) {
-    if (a.mutating) return 'soon'
-    if (a.needsIndex && menuRow.value?.index == null) return 'no index'
-    return a.hint || ''
-}
+function isDisabled(a) { return actionDisabled(a, gateCtx()) }
+function hintFor(a) { return actionHint(a, gateCtx()) }
 
 // --- Row menu (teleported popover) ---
 const scrollEl = ref(null)

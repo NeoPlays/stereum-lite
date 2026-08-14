@@ -147,7 +147,17 @@ export class SSHService {
         throw new Error('No available SSH connection')
     }
 
-    async exec(command, useSudo = true, { timeoutMs = SSHService.EXEC_TIMEOUT_MS } = {}) {
+    /**
+     * Run a command over SSH and collect its output.
+     *
+     * `input` is written to the command's STDIN and then closed. This is the only way to hand a
+     * remote command a secret (keymanager token, keystore JSON, keystore password) without it
+     * appearing in the host's process list, where a bare `-H 'Authorization: Bearer x'` would sit
+     * in plain view of every user on the box. Note the command still runs under `sudo` by default;
+     * that is safe here only because stereum hosts have passwordless sudo, so sudo passes stdin
+     * straight through to the child instead of consuming it as a password.
+     */
+    async exec(command, useSudo = true, { timeoutMs = SSHService.EXEC_TIMEOUT_MS, input = null } = {}) {
         if (useSudo) {
             command = "sudo " + command
         }
@@ -210,6 +220,16 @@ export class SSHService {
                     data.stderr += stderr.toString("utf8");
                     arm();
                   });
+
+                // Feed the secret in and close stdin, so a remote `read`/`cat` sees EOF and
+                // doesn't hang until the idle timeout. Only touched when a caller opts in.
+                if (input != null) {
+                  try {
+                    stream.end(input)
+                  } catch (e) {
+                    log.error('SSH :: failed writing exec stdin:', e?.message || e)
+                  }
+                }
               });
         })
     }

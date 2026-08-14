@@ -49,10 +49,13 @@
 
 <script setup>
 import { onMounted, onUnmounted } from 'vue'
+import { actionDisabled, actionHint } from '@renderer/utils/validatorCapabilities'
 
 const props = defineProps({
     validator: { type: Object, required: true },
     actions: { type: Array, default: () => [] },
+    soloEligible: { type: Boolean, default: false },
+    graffitiSupported: { type: Boolean, default: true },
 })
 const emit = defineEmits(['close', 'action'])
 
@@ -69,14 +72,11 @@ function withdrawalText(type) {
     if (type === '0x00') return '0x00 (BLS)'
     return '—'
 }
-function isDisabled(a) {
-    return Boolean(a.disabled || a.mutating || (a.needsIndex && props.validator.index == null))
+function gateCtx() {
+    return { row: props.validator, soloEligible: props.soloEligible, graffitiSupported: props.graffitiSupported }
 }
-function hintFor(a) {
-    if (a.mutating) return 'soon'
-    if (a.needsIndex && props.validator.index == null) return 'no index'
-    return a.hint || ''
-}
+function isDisabled(a) { return actionDisabled(a, gateCtx()) }
+function hintFor(a) { return actionHint(a, gateCtx()) }
 function copy(text) { navigator.clipboard?.writeText(text) }
 
 function onKey(e) { if (e.key === 'Escape') emit('close') }

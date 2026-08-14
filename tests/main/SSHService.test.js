@@ -205,6 +205,43 @@ describe('SSHService', () => {
             const r = await svc.exec('x', false)
             expect(r).toEqual({ rc: 2, stdout: 'hello', stderr: 'warn' })
         })
+
+        it('writes input to stdin and closes it', async () => {
+            const svc = new SSHService(makeParams())
+            const stream = new FakeStream()
+            stream.end = vi.fn(() => setImmediate(() => stream.emit('close', 0)))
+            svc.connections = [{
+                conn: { exec: (cmd, cb) => cb(null, stream) },
+                sessionCount: 0,
+            }]
+            await svc.exec('cat', false, { input: 'secret-token' })
+            expect(stream.end).toHaveBeenCalledWith('secret-token')
+        })
+
+        it('never touches stdin when no input is given', async () => {
+            const svc = new SSHService(makeParams())
+            const stream = new FakeStream()
+            stream.end = vi.fn()
+            svc.connections = [{
+                conn: { exec: (cmd, cb) => {
+                    cb(null, stream)
+                    setImmediate(() => stream.emit('close', 0))
+                } },
+                sessionCount: 0,
+            }]
+            await svc.exec('ls', false)
+            expect(stream.end).not.toHaveBeenCalled()
+        })
+
+        it('keeps the secret out of the command line', async () => {
+            const svc = new SSHService(makeParams())
+            const stream = new FakeStream()
+            stream.end = vi.fn(() => setImmediate(() => stream.emit('close', 0)))
+            const exec = vi.fn((cmd, cb) => cb(null, stream))
+            svc.connections = [{ conn: { exec }, sessionCount: 0 }]
+            await svc.exec('read -r T; use "$T"', true, { input: 'hunter2' })
+            expect(exec.mock.calls[0][0]).not.toContain('hunter2')
+        })
     })
 
     describe('execStream', () => {

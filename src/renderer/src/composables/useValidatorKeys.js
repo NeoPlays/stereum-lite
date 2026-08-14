@@ -58,7 +58,30 @@ export function useValidatorKeys(nodeId) {
         }
     }
 
+    /**
+     * Load per-key fee recipient + graffiti from the validator client's keymanager API.
+     * Also records `graffitiSupported`: older client builds have no graffiti route, and the UI
+     * hides the action rather than offering something that would 404.
+     */
+    async function loadSettings(serviceId, pubkeys) {
+        if (!serviceId || !pubkeys?.length) return
+        cache[serviceId] = { ...(cache[serviceId] || { keys: [] }), settingsLoading: true, settingsError: '' }
+        try {
+            const res = await window.api.invoke('get-validator-settings', resolveNodeId(), serviceId, pubkeys)
+            cache[serviceId] = {
+                ...cache[serviceId],
+                settingsLoading: false,
+                settings: res?.ok ? (res.settings || {}) : (cache[serviceId].settings || {}),
+                settingsError: res?.ok ? '' : (res?.error || 'Could not load validator settings'),
+                // Only a successful read may assert support; a failed read leaves it unproven (undefined).
+                graffitiSupported: res?.ok ? res.graffitiSupported !== false : cache[serviceId].graffitiSupported,
+            }
+        } catch (e) {
+            cache[serviceId] = { ...cache[serviceId], settingsLoading: false, settingsError: e?.message || 'Could not load validator settings' }
+        }
+    }
+
     const state = (serviceId) => cache[serviceId] ?? { loading: false, keys: [], error: '' }
 
-    return { cache, load, loadStates, state }
+    return { cache, load, loadStates, loadSettings, state }
 }

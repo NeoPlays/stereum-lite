@@ -1,4 +1,5 @@
 import { ipcMain, BrowserWindow, dialog, net } from "electron";
+import { writeFileSync } from "fs";
 import storage from "@main/store/StoreService"
 import nodeManager from "@main/nodes/NodeManager"
 import taskManager from "@main/tasks/TaskManager"
@@ -285,6 +286,77 @@ export function initializeIpcHandlers() {
         } catch (error) {
             log.error('list-validators error:', error)
             return { ok: false, error: error.message || 'list-validators failed', keys: [] }
+        }
+    });
+
+    // Per-validator settings. These are WRITES, but they keep their own channels rather than going
+    // through run-node-task: that returns { taskId } and the renderer never sees the op's result,
+    // while every one of these returns per-key outcomes the UI has to render. They are also fast
+    // keymanager calls, not playbooks, so there is no long-running task to observe.
+    ipcMain.handle('get-validator-settings', async (_, nodeId, serviceId, pubkeys) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.getValidatorSettings(serviceId, pubkeys)
+        } catch (error) {
+            log.error('get-validator-settings error:', error)
+            return { ok: false, error: error.message || 'get-validator-settings failed', settings: {} }
+        }
+    });
+
+    ipcMain.handle('set-fee-recipient', async (_, nodeId, serviceId, pubkeys, address) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.setFeeRecipient(serviceId, pubkeys, address)
+        } catch (error) {
+            log.error('set-fee-recipient error:', error)
+            return { ok: false, error: error.message || 'set-fee-recipient failed' }
+        }
+    });
+
+    ipcMain.handle('set-graffiti', async (_, nodeId, serviceId, pubkeys, graffiti) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.setGraffiti(serviceId, pubkeys, graffiti)
+        } catch (error) {
+            log.error('set-graffiti error:', error)
+            return { ok: false, error: error.message || 'set-graffiti failed' }
+        }
+    });
+
+    ipcMain.handle('delete-validator-keys', async (_, nodeId, serviceId, pubkeys) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.deleteValidatorKeys(serviceId, pubkeys)
+        } catch (error) {
+            log.error('delete-validator-keys error:', error)
+            return { ok: false, error: error.message || 'delete-validator-keys failed' }
+        }
+    });
+
+    // Write the slashing-protection record a delete returned to a file the user chooses.
+    // Deliberately a separate channel the renderer awaits: the removal flow must not report
+    // success until this has written, because the record cannot be reconstructed from anywhere
+    // else. (Repeating the delete does re-return it, which is the recovery path.)
+    ipcMain.handle('save-slashing-protection', async (_, content, suggestedName) => {
+        try {
+            if (typeof content !== 'string' || !content) throw new Error('Nothing to save')
+            const win = BrowserWindow.getFocusedWindow()
+            const opts = {
+                title: 'Save slashing protection',
+                defaultPath: suggestedName || 'slashing_protection.json',
+                filters: [{ name: 'EIP-3076 interchange', extensions: ['json'] }],
+            }
+            const result = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts)
+            if (result.canceled || !result.filePath) return { ok: false, canceled: true }
+            writeFileSync(result.filePath, content, 'utf8')
+            return { ok: true, path: result.filePath }
+        } catch (error) {
+            log.error('save-slashing-protection error:', error)
+            return { ok: false, error: error.message || 'Could not save the file' }
         }
     });
 

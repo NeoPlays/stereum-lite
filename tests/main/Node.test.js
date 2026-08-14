@@ -1018,6 +1018,239 @@ describe('Node', () => {
         })
     })
 
+    describe('validator settings (fee recipient / graffiti)', () => {
+        const VC_YAML = 'service: LighthouseValidatorService\ncommand:\n  - --http\n'
+        // Real-shaped BLS pubkeys: 0x + 96 hex. The code validates this before building a URL
+        // path from them, so short stand-ins would not exercise the real path.
+        const PK_A = '0x' + 'a'.repeat(96)
+        const PK_B = '0x' + 'b'.repeat(96)
+
+        // exec order for these ops: [0] read the service yaml, [1] read the bearer token,
+        // then one batched sidecar per keymanager route.
+        function wire(...batchStdouts) {
+            let call = 0
+            node.sshService.exec = vi.fn(async () => {
+                const i = call++
+                if (i === 0) return ok(VC_YAML)
+                if (i === 1) return ok('TOKEN\n')
+                const stdout = batchStdouts.shift() ?? ''
+                // every batch re-reads the token first
+                return ok(stdout)
+            })
+        }
+
+        it('sends the bearer token over stdin, never on the command line', async () => {
+            const calls = []
+            node.sshService.exec = vi.fn(async (cmd, sudo, opts) => {
+                calls.push({ cmd, input: opts?.input })
+                if (calls.length === 1) return ok(VC_YAML)
+                if (calls.length === 2) return ok('SUPERSECRET\n')
+                return ok(`===KM_RESP:${PK_A}:202===\n`)
+            })
+            await node.setFeeRecipient('svc', [PK_A], '0x' + '1'.repeat(40))
+            const sidecar = calls[calls.length - 1]
+            expect(sidecar.cmd).not.toContain('SUPERSECRET')
+            expect(sidecar.input).toContain('SUPERSECRET')
+        })
+
+        it('rejects a malformed fee recipient before touching the node', async () => {
+            node.sshService.exec = vi.fn(async () => ok(VC_YAML))
+            const r = await node.setFeeRecipient('svc', [PK_A], '0xnope')
+            expect(r.ok).toBe(false)
+            expect(r.error).toContain('valid execution address')
+        })
+
+        it('rejects graffiti longer than 32 bytes, counting bytes not characters', async () => {
+            node.sshService.exec = vi.fn(async () => ok(VC_YAML))
+            const r = await node.setGraffiti('svc', [PK_A], '\u{1F680}'.repeat(9))
+            expect(r.ok).toBe(false)
+            expect(r.error).toContain('32 bytes')
+        })
+
+        it('reports per-key outcomes independently on a partial failure', async () => {
+            let call = 0
+            node.sshService.exec = vi.fn(async () => {
+                const i = call++
+                if (i === 0) return ok(VC_YAML)
+                if (i === 1) return ok('TOKEN')
+                return ok(`===KM_RESP:${PK_A}:202===\n{"message":"locked"}\n===KM_RESP:${PK_B}:403===\n`)
+            })
+            const r = await node.setFeeRecipient('svc', [PK_A, PK_B], '0x' + '1'.repeat(40))
+            expect(r.ok).toBe(true)
+            expect(r.results[PK_A]).toEqual({ ok: true })
+            expect(r.results[PK_B].ok).toBe(false)
+            expect(r.results[PK_B].error).toContain('locked')
+        })
+
+        it('accepts Prysm 200 where the spec says 202', async () => {
+            let call = 0
+            node.sshService.exec = vi.fn(async () => {
+                const i = call++
+                if (i === 0) return ok(VC_YAML)
+                if (i === 1) return ok('TOKEN')
+                return ok(`===KM_RESP:${PK_A}:200===\n`)
+            })
+            const r = await node.setGraffiti('svc', [PK_A], 'hi')
+            expect(r.results[PK_A].ok).toBe(true)
+        })
+
+        it('treats 404 on a clear as success but as a failure on a set', async () => {
+            const respond = (code) => async (cmd, sudo, opts) => {
+                if (!opts?.input && !cmd.includes('docker run')) return ok(VC_YAML)
+                if (cmd.startsWith('docker exec')) return ok('TOKEN')
+                return ok(`===KM_RESP:${PK_A}:${code}===\n`)
+            }
+            node.sshService.exec = vi.fn(respond(404))
+            const cleared = await node.setGraffiti('svc', [PK_A], null)
+            expect(cleared.results[PK_A].ok).toBe(true)
+
+            node.sshService.exec = vi.fn(respond(404))
+            const set = await node.setGraffiti('svc', [PK_A], 'hi')
+            expect(set.results[PK_A].ok).toBe(false)
+        })
+
+        it('flags a key the client never answered for rather than calling it a success', async () => {
+            let call = 0
+            node.sshService.exec = vi.fn(async () => {
+                const i = call++
+                if (i === 0) return ok(VC_YAML)
+                if (i === 1) return ok('TOKEN')
+                return ok(`===KM_RESP:${PK_A}:202===\n`)   // PK_B missing entirely
+            })
+            const r = await node.setFeeRecipient('svc', [PK_A, PK_B], '0x' + '1'.repeat(40))
+            expect(r.results[PK_A].ok).toBe(true)
+            expect(r.results[PK_B]).toEqual({ ok: false, error: 'No response from the client' })
+        })
+
+        it('never builds a request from a malformed pubkey', async () => {
+            let call = 0
+            const seen = []
+            node.sshService.exec = vi.fn(async (cmd, sudo, opts) => {
+                const i = call++
+                if (i === 0) return ok(VC_YAML)
+                if (i === 1) return ok('TOKEN')
+                seen.push(opts?.input)
+                return ok(`===KM_RESP:${PK_A}:202===\n`)
+            })
+            const r = await node.setFeeRecipient('svc', [PK_A, '0xnope/../evil'], '0x' + '1'.repeat(40))
+            expect(seen[0]).not.toContain('evil')
+            // The skipped key is reported as unwritten, never silently as a success.
+            expect(r.results['0xnope/../evil']).toEqual({ ok: false, error: 'No response from the client' })
+        })
+
+        it('refuses to act on a service that is not a keymanager client', async () => {
+            node.sshService.exec = vi.fn(async () => ok('service: GethService\n'))
+            const r = await node.setFeeRecipient('svc', [PK_A], '0x' + '1'.repeat(40))
+            expect(r.ok).toBe(false)
+            expect(r.error).toContain('does not support')
+        })
+
+        it('reads settings and reports graffiti as unsupported on an older client', async () => {
+            let call = 0
+            node.sshService.exec = vi.fn(async () => {
+                const i = call++
+                if (i === 0) return ok(VC_YAML)
+                if (i === 1) return ok('TOKEN')
+                if (i === 2) return ok(`{"data":{"ethaddress":"0xfee"}}\n===KM_RESP:${PK_A}:200===\n`)
+                if (i === 3) return ok('TOKEN')
+                return ok(`\n===KM_RESP:${PK_A}:404===\n`)   // no graffiti route on this build
+            })
+            const r = await node.getValidatorSettings('svc', [PK_A])
+            expect(r.ok).toBe(true)
+            expect(r.settings[PK_A].feeRecipient).toBe('0xfee')
+            expect(r.graffitiSupported).toBe(false)
+        })
+
+        it('does not fire a request at all when no keys are selected', async () => {
+            node.sshService.exec = vi.fn(async () => ok(VC_YAML))
+            const r = await node.setFeeRecipient('svc', [], '0x' + '1'.repeat(40))
+            expect(r.ok).toBe(false)
+            expect(r.error).toContain('No keys selected')
+        })
+    })
+
+    describe('deleteValidatorKeys', () => {
+        const VC_YAML = 'service: LighthouseValidatorService\ncommand:\n  - --http\n'
+        const PK_A = '0x' + 'a'.repeat(96)
+        const PK_B = '0x' + 'b'.repeat(96)
+        const PROTECTION = JSON.stringify({ metadata: { interchange_format_version: '5' }, data: [{ pubkey: PK_A }] })
+
+        function wireDelete(responseBody, httpCode = 200) {
+            let call = 0
+            node.sshService.exec = vi.fn(async () => {
+                const i = call++
+                if (i === 0) return ok(VC_YAML)
+                if (i === 1) return ok('TOKEN')
+                return ok(`${responseBody}\n${httpCode}`)
+            })
+        }
+
+        it('returns the protection record alongside per-key statuses', async () => {
+            wireDelete(JSON.stringify({ data: [{ status: 'deleted' }], slashing_protection: PROTECTION }))
+            const r = await node.deleteValidatorKeys('svc', [PK_A])
+            expect(r.ok).toBe(true)
+            expect(r.results[0]).toMatchObject({ pubkey: PK_A, status: 'deleted' })
+            expect(r.slashingProtection).toBe(PROTECTION)
+            expect(r.complete).toBe(true)
+        })
+
+        it('flags keys the client could not stop signing', async () => {
+            wireDelete(JSON.stringify({
+                data: [{ status: 'deleted' }, { status: 'error', message: 'busy' }],
+                slashing_protection: PROTECTION,
+            }))
+            const r = await node.deleteValidatorKeys('svc', [PK_A, PK_B])
+            expect(r.failed).toEqual([PK_B])
+        })
+
+        it('reports an incomplete record when a removed key has no history in it', async () => {
+            wireDelete(JSON.stringify({
+                data: [{ status: 'deleted' }, { status: 'deleted' }],
+                slashing_protection: PROTECTION,   // only covers 0xaaa
+            }))
+            const r = await node.deleteValidatorKeys('svc', [PK_A, PK_B])
+            expect(r.complete).toBe(false)
+        })
+
+        it('does not count a not_found key against protection completeness', async () => {
+            wireDelete(JSON.stringify({
+                data: [{ status: 'deleted' }, { status: 'not_found' }],
+                slashing_protection: PROTECTION,
+            }))
+            const r = await node.deleteValidatorKeys('svc', [PK_A, PK_B])
+            expect(r.notFound).toEqual([PK_B])
+            expect(r.complete).toBe(true)
+        })
+
+        it('surfaces a non-200 verbatim instead of pretending keys were removed', async () => {
+            wireDelete(JSON.stringify({ message: 'token invalid' }), 403)
+            const r = await node.deleteValidatorKeys('svc', [PK_A])
+            expect(r.ok).toBe(false)
+            expect(r.error).toContain('token invalid')
+        })
+
+        it('sends the pubkeys in the request body, over stdin', async () => {
+            const calls = []
+            node.sshService.exec = vi.fn(async (cmd, sudo, opts) => {
+                calls.push({ cmd, input: opts?.input })
+                if (calls.length === 1) return ok(VC_YAML)
+                if (calls.length === 2) return ok('TOKEN')
+                return ok(JSON.stringify({ data: [{ status: 'deleted' }], slashing_protection: PROTECTION }) + '\n200')
+            })
+            await node.deleteValidatorKeys('svc', [PK_A])
+            const sidecar = calls[calls.length - 1]
+            expect(sidecar.input).toContain('request = "DELETE"')
+            expect(sidecar.input).toContain(PK_A)
+        })
+
+        it('refuses without keys or on a non-keymanager service', async () => {
+            node.sshService.exec = vi.fn(async () => ok(VC_YAML))
+            expect((await node.deleteValidatorKeys('svc', [])).error).toContain('No keys selected')
+            node.sshService.exec = vi.fn(async () => ok('service: GethService\n'))
+            expect((await node.deleteValidatorKeys('svc', [PK_A])).error).toContain('does not support')
+        })
+    })
+
     describe('toDTO status field', () => {
         it('includes the current status in the full DTO', async () => {
             node._setStatus('connected')

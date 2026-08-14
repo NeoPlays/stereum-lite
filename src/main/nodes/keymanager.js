@@ -112,30 +112,140 @@ export function keymanagerTarget(config) {
     }
 }
 
-/**
- * The inner `sh -c` curl script that hits the keymanager API and appends the HTTP status on
- * a trailing line (so a non-2xx is distinguishable from a transport failure). Pure - Node
- * wraps it in the `docker run --network stereum --entrypoint sh` sidecar and escapes quotes,
- * exactly like buildClientProbeScript. Returns null if the URL params are unusable.
- */
-export function buildKeymanagerScript({ serviceId, scheme = 'http', port, insecure = false, method = 'GET', path, token, body }) {
+// Seconds a single keymanager request may take before curl gives up.
+const KEYMANAGER_TIMEOUT_S = 20
+
+/** Full URL of a keymanager endpoint on a service's container. Null if unusable. */
+export function keymanagerUrl({ serviceId, scheme = 'http', port, path }) {
     if (!serviceId || !port || !path) return null
-    const p = path.startsWith('/') ? path : '/' + path
-    const url = `${scheme}://stereum-${serviceId}:${port}${p}`
-    const parts = [
-        'curl -sS',
-        insecure ? '--insecure' : '',
-        `-X ${String(method).toUpperCase()}`,
-        `'${url}'`,
-        `-H 'Content-Type: application/json'`,
-        token ? `-H 'Authorization: Bearer ${token}'` : '',
-        body !== undefined ? `-d '${JSON.stringify(body)}'` : '',
-        `-w '\\n%{http_code}'`,
-    ]
-    return parts.filter(Boolean).join(' ')
+    return `${scheme}://stereum-${serviceId}:${port}${path.startsWith('/') ? path : '/' + path}`
 }
 
-/** Wrap a keymanager script in the curl sidecar command (matches metrics.fetchClientMetrics). */
+/**
+ * Escape a value for a curl config file's double-quoted form. curl understands the C-style
+ * escapes \\ \" \t \r \n inside quotes, so backslash must be escaped FIRST or it would double
+ * up the escapes we add afterwards. Raw newlines have to go: a config file is line-oriented,
+ * and an unescaped newline would silently split one directive into two.
+ */
+function configQuote(value) {
+    const escaped = String(value)
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\t/g, '\\t')
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n')
+    return `"${escaped}"`
+}
+
+/**
+ * Build a curl config file (`curl -K -`) for one keymanager request.
+ *
+ * This exists to keep secrets off the command line. The bearer token, keystore JSON, and
+ * keystore passwords all travel inside this config, which is piped over SSH stdin, so none of
+ * them appear in the host's process list - where `-H 'Authorization: Bearer …'` would sit in
+ * plain view of every user on the box.
+ *
+ * It also fixes a quoting hazard: the old builder interpolated `JSON.stringify(body)` into a
+ * single-quoted shell string, and JSON.stringify does not escape single quotes. One apostrophe
+ * in a graffiti string or a keystore password would end the quote and corrupt the command.
+ * Here every value goes through configQuote instead of the shell.
+ *
+ * @returns {string|null} config text, or null when the URL parameters are unusable
+ */
+export function buildCurlConfig({ url, method = 'GET', headers = {}, body, insecure = false, timeoutS = KEYMANAGER_TIMEOUT_S }) {
+    if (!url) return null
+    const lines = [
+        `url = ${configQuote(url)}`,
+        `request = ${configQuote(String(method).toUpperCase())}`,
+    ]
+    for (const [name, value] of Object.entries(headers)) {
+        if (value != null && value !== '') lines.push(`header = ${configQuote(`${name}: ${value}`)}`)
+    }
+    // `data` forces a request body; only add it when there is one, or curl would POST an empty
+    // string on requests that must have no body at all (DELETE feerecipient, GET).
+    if (body !== undefined) lines.push(`data = ${configQuote(typeof body === 'string' ? body : JSON.stringify(body))}`)
+    if (insecure) lines.push('insecure')
+    lines.push(`max-time = ${configQuote(timeoutS)}`, 'silent', 'show-error')
+    return lines.join('\n') + '\n'
+}
+
+/**
+ * The sidecar that consumes the config on stdin. `-i` is load-bearing: without it docker closes
+ * the container's stdin and curl reads an empty config. `-w` stays on argv because the format
+ * string is a fixed literal with nothing secret in it, and parseKeymanagerResponse depends on
+ * that trailing status line.
+ */
+export function buildSidecarStdinCommand() {
+    return `docker run --rm -i --network ${STEREUM_DOCKER_NETWORK} --entrypoint curl ${CURL_IMAGE} -K - -w '\\n%{http_code}'`
+}
+
+/** The same sidecar for a batched config, which carries its own per-request write-out. */
+export function buildBatchSidecarCommand() {
+    return `docker run --rm -i --network ${STEREUM_DOCKER_NETWORK} --entrypoint curl ${CURL_IMAGE} -K -`
+}
+
+// Delimiter curl prints after each request in a batch. Carries the request key so responses are
+// matched by IDENTITY, never by position - a request that fails to connect still prints its
+// marker (with code 000), but relying on order would break the moment one ever did not.
+const BATCH_MARKER_PREFIX = '===KM_RESP:'
+const BATCH_MARKER_SUFFIX = '==='
+
+/**
+ * Build one curl config holding MANY requests, separated by curl's `next` directive.
+ *
+ * This is how a bulk action over N pubkeys becomes a single SSH exec instead of N round trips
+ * (N=1000 at ~200ms each would be minutes). Each section carries its own `write-out`, because
+ * an argv-level `-w` only applies to the first request in a `next` chain - verified against a
+ * real curl, and the reason this is not just `-w` on the command line.
+ *
+ * @param {{ key: string, url: string, method?: string, headers?: object, body?: any, insecure?: boolean }[]} requests
+ * @returns {string|null} config text, or null if no request is usable
+ */
+export function buildCurlConfigBatch(requests = []) {
+    const sections = []
+    for (const r of requests) {
+        if (!r?.url) continue
+        const base = buildCurlConfig({ url: r.url, method: r.method, headers: r.headers, body: r.body, insecure: r.insecure })
+        if (!base) continue
+        // The key is a pubkey (public, non-secret), so embedding it in the marker is safe.
+        const marker = `\\n${BATCH_MARKER_PREFIX}${sanitizeMarkerKey(r.key)}:%{http_code}${BATCH_MARKER_SUFFIX}\\n`
+        sections.push(`${base.trimEnd()}\nwrite-out = "${marker}"`)
+    }
+    if (!sections.length) return null
+    return sections.join('\n\nnext\n\n') + '\n'
+}
+
+/** Keys land inside a curl format string, so keep them to characters that cannot disturb it. */
+function sanitizeMarkerKey(key) {
+    return String(key ?? '').replace(/[^0-9a-zA-Z_-]/g, '')
+}
+
+/**
+ * Split a batched sidecar's stdout into `{ [key]: { httpCode, body } }`.
+ * Bodies are whatever preceded each marker. A key with no marker never answered at all.
+ */
+export function parseBatchResponses(stdout) {
+    const text = String(stdout ?? '')
+    const re = new RegExp(`${BATCH_MARKER_PREFIX}([0-9a-zA-Z_-]*):(\\d+)${BATCH_MARKER_SUFFIX}`, 'g')
+    const out = {}
+    let lastIndex = 0
+    let m
+    while ((m = re.exec(text)) !== null) {
+        const [, key, code] = m
+        out[key] = { httpCode: parseInt(code, 10), body: text.slice(lastIndex, m.index).trim() }
+        lastIndex = re.lastIndex
+    }
+    return out
+}
+
+/**
+ * Wrap a multi-request shell script in the `sh -c` curl sidecar.
+ *
+ * ONLY for scripts that carry no secrets - the script lands on the command line, visible in the
+ * host process list. Used by the beacon validator-state probe, which loops several requests and
+ * sends nothing but public pubkeys. Anything with a token, keystore, or password must go through
+ * buildKeymanagerRequest and its stdin config instead.
+ */
 export function wrapSidecar(script) {
     const escaped = script.replace(/'/g, `'"'"'`)
     return `docker run --rm --network ${STEREUM_DOCKER_NETWORK} --entrypoint sh ${CURL_IMAGE} -c '${escaped}'`
@@ -178,9 +288,29 @@ export function parseToken(serviceType, stdout) {
     return s.trim()
 }
 
-/** Web3Signer lists its keys via its own API (no bearer token) - build that sidecar script. */
-export function buildWeb3SignerScript(serviceId, port = KEYMANAGER_REGISTRY.Web3SignerService.port) {
-    return buildKeymanagerScript({ serviceId, scheme: 'http', port, method: 'GET', path: '/api/v1/eth2/publicKeys' })
+/**
+ * Everything needed to run one keymanager request: the sidecar command and the config to pipe
+ * into its stdin. Callers do `sshService.exec(command, true, { input })`.
+ * @returns {{ command: string, input: string }|null}
+ */
+export function buildKeymanagerRequest({ serviceId, target, method = 'GET', path, token, body }) {
+    const url = keymanagerUrl({ serviceId, scheme: target?.scheme, port: target?.port, path })
+    if (!url) return null
+    const headers = {}
+    if (body !== undefined) headers['Content-Type'] = 'application/json'
+    if (token) headers.Authorization = `Bearer ${token}`
+    const input = buildCurlConfig({ url, method, headers, body, insecure: Boolean(target?.insecure) })
+    return { command: buildSidecarStdinCommand(), input }
+}
+
+/** Web3Signer lists its keys via its own API and needs no bearer token. */
+export function buildWeb3SignerRequest(serviceId, port = KEYMANAGER_REGISTRY.Web3SignerService.port) {
+    return buildKeymanagerRequest({
+        serviceId,
+        target: { scheme: 'http', port, insecure: false },
+        method: 'GET',
+        path: '/api/v1/eth2/publicKeys',
+    })
 }
 
 /**
@@ -209,6 +339,152 @@ export function parseKeystoresList(bodyOrJson) {
         derivationPath: k.derivation_path ?? null,
         readonly: Boolean(k.readonly),
     })).filter((k) => k.pubkey)
+}
+
+/**
+ * Human-readable error for a non-2xx keymanager response. Clients disagree on the error body
+ * (the spec says `{message}`, Lighthouse adds `{code, stacktraces}`), so the message is shown
+ * verbatim when present and never branched on - a client's own wording beats anything we invent.
+ */
+export function keymanagerHttpError({ httpCode, body } = {}, fallback = 'Client API unreachable (is it running?)') {
+    if (!httpCode) return fallback
+    let message = ''
+    try {
+        const json = JSON.parse(body)
+        if (typeof json?.message === 'string') message = json.message
+    } catch { /* not JSON - fall through to the bare status */ }
+    return message ? `HTTP ${httpCode}: ${message}` : `Keymanager HTTP ${httpCode}`
+}
+
+// ---------------------------------------------------------------------------------------------
+// Keystore removal. DELETE carries a body, which is unusual but is what the spec mandates.
+// ---------------------------------------------------------------------------------------------
+
+export const KEYSTORES_PATH = '/eth/v1/keystores'
+
+// Spec statuses for a delete. `not_active` means the key was present but not actively signing,
+// which still yields protection data and is NOT a failure. `error` means the key was found and
+// could NOT be stopped - the one status that must block any follow-on import, because the key
+// may still be signing somewhere.
+export const DELETE_OK_STATUSES = ['deleted', 'not_active']
+
+/**
+ * Parse DELETE /eth/v1/keystores.
+ *
+ * The response's `data[]` has no pubkey field, so entries correlate to the REQUEST order by
+ * index and nothing else. Mismatched lengths are treated as a protocol failure rather than
+ * quietly zipping a short array, which would attribute one key's status to another.
+ *
+ * @param {string} body - raw response body
+ * @param {string[]} pubkeys - exactly the pubkeys sent, in order
+ */
+export function parseDeleteKeystoresResponse(body, pubkeys = []) {
+    let json
+    try { json = JSON.parse(body) } catch { return { error: 'Unreadable delete response' } }
+    const data = json?.data
+    if (!Array.isArray(data)) return { error: 'Delete response had no results' }
+    if (data.length !== pubkeys.length) {
+        return { error: `Client returned ${data.length} results for ${pubkeys.length} keys` }
+    }
+    const results = pubkeys.map((pubkey, i) => ({
+        pubkey,
+        status: String(data[i]?.status ?? 'error'),
+        message: data[i]?.message ?? '',
+    }))
+    // The blob is a JSON string per spec. Keep it as the exact string the client produced -
+    // reparsing and re-serialising risks mangling the uint64 fields, which are strings on purpose.
+    const slashingProtection = typeof json.slashing_protection === 'string' ? json.slashing_protection : null
+    return { results, slashingProtection }
+}
+
+/** Keys the client could not stop signing. Any of these must block a follow-on import. */
+export const deleteErrors = (results = []) => results.filter((r) => r.status === 'error')
+
+/** Keys the client had never heard of, so the protection blob says nothing about them. */
+export const deleteNotFound = (results = []) => results.filter((r) => r.status === 'not_found')
+
+/** Does this protection blob actually cover every key we asked to remove? */
+export function protectionCoversAll(slashingProtection, pubkeys = []) {
+    if (!slashingProtection) return false
+    let json
+    try { json = JSON.parse(slashingProtection) } catch { return false }
+    const covered = new Set((json?.data || []).map((d) => String(d?.pubkey ?? '').toLowerCase()))
+    return pubkeys.every((p) => covered.has(String(p).toLowerCase()))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-validator settings: fee recipient and graffiti.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A BLS validator pubkey: 0x + 96 hex. Checked before a pubkey is ever interpolated into a URL
+ * path or a curl write-out marker. The values come from the client's own keystore listing, so
+ * this is defence in depth rather than a known hole - but a path segment is the wrong place to
+ * find out you trusted the wrong string.
+ */
+export const isValidPubkey = (pubkey) => /^0x[0-9a-fA-F]{96}$/.test(String(pubkey ?? ''))
+
+export const feeRecipientPath = (pubkey) => `/eth/v1/validator/${pubkey}/feerecipient`
+export const graffitiPath = (pubkey) => `/eth/v1/validator/${pubkey}/graffiti`
+
+/** The consensus graffiti field is 32 BYTES, not 32 characters - emoji cost 4 each. */
+export const GRAFFITI_MAX_BYTES = 32
+export const graffitiByteLength = (text) => Buffer.byteLength(String(text ?? ''), 'utf8')
+export const isValidGraffiti = (text) => graffitiByteLength(text) <= GRAFFITI_MAX_BYTES
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+
+/** A settable fee recipient: 20-byte hex address, and not the burn address (spec rejects it). */
+export function isValidFeeRecipient(address) {
+    const a = String(address ?? '').trim()
+    if (!/^0x[0-9a-fA-F]{40}$/.test(a)) return false
+    return a.toLowerCase() !== ZERO_ADDRESS
+}
+
+/**
+ * Did a keymanager WRITE succeed?
+ *
+ * The spec says 202 for POST and 204 for DELETE, but Prysm answers 200 for both. Rather than
+ * branch per client, accept any 2xx - no client uses a 2xx to mean failure.
+ */
+export const isWriteSuccess = (httpCode) => httpCode >= 200 && httpCode < 300
+
+/**
+ * Did a graffiti/fee-recipient CLEAR succeed? Prysm returns 404 when there was nothing set,
+ * which is the requested end state, so it counts as success. This is only safe because we gate
+ * the action on a prior successful GET: a 404 from a client that lacks the route entirely never
+ * reaches here, because such a service is not offered the action in the first place.
+ */
+export const isClearSuccess = (httpCode) => isWriteSuccess(httpCode) || httpCode === 404
+
+/**
+ * Parse GET feerecipient. Returns `{ value }`, or `{ unset: true }`.
+ *
+ * Prysm answers 400 "No fee recipient set" instead of 200 when nothing is configured, so that
+ * specific code means unset rather than an error. Note the value is the EFFECTIVE one: the spec
+ * gives no way to tell a per-key override from the client's process-wide default.
+ */
+export function parseFeeRecipient(httpCode, body) {
+    if (httpCode === 400 || httpCode === 404) return { unset: true }
+    if (httpCode !== 200) return { error: keymanagerHttpError({ httpCode, body }) }
+    try {
+        const address = JSON.parse(body)?.data?.ethaddress
+        return typeof address === 'string' ? { value: address } : { unset: true }
+    } catch { return { error: 'Unreadable fee recipient response' } }
+}
+
+/**
+ * Parse GET graffiti. A 404 means this build has no graffiti route (it landed in Lighthouse
+ * 4.6 / Teku 23.12 / Nimbus 24.3 / Lodestar 1.12 / Prysm 5.1), which the caller turns into
+ * "unsupported" so the UI can hide the action rather than fail it later.
+ */
+export function parseGraffiti(httpCode, body) {
+    if (httpCode === 404) return { unsupported: true }
+    if (httpCode !== 200) return { error: keymanagerHttpError({ httpCode, body }) }
+    try {
+        const graffiti = JSON.parse(body)?.data?.graffiti
+        return typeof graffiti === 'string' ? { value: graffiti } : { unset: true }
+    } catch { return { error: 'Unreadable graffiti response' } }
 }
 
 /** Parse Web3Signer GET /api/v1/eth2/publicKeys -> [{ pubkey, readonly:true }]. */

@@ -132,6 +132,8 @@
                             :selected="selected"
                             :header-state="headerState"
                             :row-actions="capability.rowActions"
+                            :solo-eligible="soloEligible"
+                            :graffiti-supported="graffitiSupported"
                             :stats-applicable="statsApplicable"
                             :network="network"
                             :page="pageClamped"
@@ -157,9 +159,31 @@
             v-if="detail"
             :validator="detail"
             :actions="capability.drawerActions"
+            :solo-eligible="soloEligible"
+            :graffiti-supported="graffitiSupported"
             @close="detail = null"
             @action="onDrawerAction"
         />
+
+        <Teleport to="body">
+            <ValidatorRemoveModal
+                v-if="removeModal"
+                :pubkeys="removeModal.pubkeys"
+                :client-name="shortName(activeService)"
+                @close="closeRemoveModal"
+                @remove="applyRemove"
+                @save="saveProtection"
+            />
+            <ValidatorSettingModal
+                v-if="settingModal"
+                :kind="settingModal.kind"
+                :pubkeys="settingModal.pubkeys"
+                :current="settingModal.current"
+                :client-name="shortName(activeService)"
+                @close="settingModal = null"
+                @apply="applySetting"
+            />
+        </Teleport>
 
         <Teleport to="body">
             <div v-if="beaconModal" class="modal-overlay" @click.self="beaconModal = false">
@@ -187,11 +211,14 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { classifyValidatorSetup, SOLO_VC_TYPES, holdsOnChainValidators } from '@renderer/utils/validatorSetup'
-import { capabilityFor, explorerUrl } from '@renderer/utils/validatorCapabilities'
+import { classifyValidatorSetup, SOLO_VC_TYPES, holdsOnChainValidators, isSoloEligible } from '@renderer/utils/validatorSetup'
+import { capabilityFor, explorerUrl, actionDisabled } from '@renderer/utils/validatorCapabilities'
 import { useValidatorKeys } from '@renderer/composables/useValidatorKeys'
+import { scopeTargets, selectionCount, effectiveScopeOf, scopeCountOf } from '@renderer/utils/validatorScope'
 import ValidatorTable from './validators/ValidatorTable.vue'
 import ValidatorDetailDrawer from './validators/ValidatorDetailDrawer.vue'
+import ValidatorSettingModal from './validators/ValidatorSettingModal.vue'
+import ValidatorRemoveModal from './validators/ValidatorRemoveModal.vue'
 
 const props = defineProps({
     services: { type: Array, default: () => [] },
@@ -246,6 +273,10 @@ const holders = computed(() => {
             out.push({
                 key: s.id, service: s, kind: cls.kind, role, setup: grp.setup,
                 listable: Boolean(s.validatorListable),
+                // Only a solo VC holds keys we may act on alone. A VC behind Charon holds a
+                // key SHARE: a keymanager write there is either meaningless or needs a
+                // threshold of operators, so every mutating action stays gated off.
+                soloEligible: isSoloEligible(cls.kind) && role === 'validator',
                 // Share pubkeys (VC/Web3Signer behind Charon) have no on-chain stats.
                 onChainStats: holdsOnChainValidators(role, cls.kind),
             })
@@ -254,7 +285,7 @@ const holders = computed(() => {
     return out
 })
 
-const { load, loadStates, state } = useValidatorKeys(() => props.nodeId)
+const { load, loadStates, loadSettings, state } = useValidatorKeys(() => props.nodeId)
 
 // Per-node "stats beacon" override (empty = the node's own beacon). Persisted in electron-store.
 const beaconUrl = ref('')
@@ -278,7 +309,7 @@ const size = ref(25)
 const detail = ref(null)
 
 let debounce
-watch(query, (q) => { clearTimeout(debounce); debounce = setTimeout(() => { queryD.value = q; page.value = 1 }, 150) })
+watch(query, (q) => { clearTimeout(debounce); debounce = setTimeout(() => { queryD.value = q; page.value = 1; allMatching.value = false }, 150) })
 
 const activeHolder = computed(() => holders.value.find((h) => h.key === activeKey.value) || null)
 const activeService = computed(() => activeHolder.value?.service || null)
@@ -288,10 +319,11 @@ const capability = computed(() => capabilityFor(activeHolder.value?.role, shortN
 // Share holders (VC/Web3Signer behind Charon) never have on-chain stats -> status/balance/etc. are n/a.
 const statsApplicable = computed(() => Boolean(activeHolder.value?.onChainStats))
 
-// Rows = keys merged with on-chain beacon state (by lowercased pubkey). Fee recipient / graffiti
-// come in a later slice; missing fields stay null and render as "-".
+// Rows = keys merged with on-chain beacon state (by lowercased pubkey) and with the per-key
+// keymanager settings (by exact pubkey). Missing fields stay null and render as "-".
 const rows = computed(() => {
     const states = st.value.states || {}
+    const settings = st.value.settings || {}
     return st.value.keys.map((k) => {
         const s = states[String(k.pubkey || '').toLowerCase()] || null
         return {
@@ -299,11 +331,18 @@ const rows = computed(() => {
             index: s?.index ?? null, status: s?.status ?? null, slashed: s?.slashed ?? false,
             balance: s?.balance ?? null, effectiveBalance: s?.effectiveBalance ?? null,
             withdrawalType: s?.withdrawalType ?? null, activationEpoch: s?.activationEpoch ?? null,
-            feeRecipient: null, graffiti: null,
+            feeRecipient: settings[k.pubkey]?.feeRecipient ?? null,
+            graffiti: settings[k.pubkey]?.graffiti ?? null,
         }
     })
 })
 const statusKnown = computed(() => rows.value.some((r) => r.status))
+// Older client builds have no graffiti route. This must fail SAFE: only enable the action once
+// a settings read has actually proved the route exists. Defaulting to "supported" while unknown
+// would let a clear run against a routeless client, where the 404 that comes back is
+// indistinguishable from "nothing was set" and would be reported as success.
+const graffitiSupported = computed(() => st.value.graffitiSupported === true)
+const soloEligible = computed(() => Boolean(activeHolder.value?.soloEligible))
 const statsLoading = computed(() => Boolean(st.value.statesLoading))
 const statsError = computed(() => st.value.statesError || '')
 
@@ -346,9 +385,18 @@ const headerState = computed(() => {
 })
 const hasSelection = computed(() => allMatching.value || selected.size > 0)
 
-const selectedCount = computed(() => allMatching.value ? (scope.value === 'filtered' ? visible.value.length : total.value) : selected.size)
-const effectiveScope = computed(() => (scope.value === 'selected' && selectedCount.value === 0) ? 'all' : scope.value)
-const scopeCount = computed(() => ({ all: total.value, filtered: visible.value.length, selected: selectedCount.value }[effectiveScope.value]))
+// One state object feeds every scope derivation, so the count shown and the keys written
+// cannot drift apart (see utils/validatorScope.js).
+const scopeState = computed(() => ({
+    scope: scope.value,
+    allMatching: allMatching.value,
+    rows: rows.value,
+    visible: visible.value,
+    selected,
+}))
+const selectedCount = computed(() => selectionCount(scopeState.value))
+const effectiveScope = computed(() => effectiveScopeOf(scopeState.value))
+const scopeCount = computed(() => scopeCountOf(scopeState.value))
 const scopeNoun = computed(() => (activeHolder.value?.role === 'distributed' ? 'DV' : 'key'))
 
 const rangeLabel = computed(() => {
@@ -388,15 +436,26 @@ function selectService(h) {
     chips.cred01 = chips.feeSet = chips.missingGraffiti = false
     selected.clear(); allMatching.value = false
     scope.value = 'all'; page.value = 1; detail.value = null
-    if (h.listable) load(h.service.id).then(() => enrich(h))
+    if (h.listable) load(h.service.id).then(() => { enrich(h); loadKeymanagerSettings(h) })
 }
-function refresh() { if (activeHolder.value) load(activeHolder.value.service.id, { force: true }).then(() => enrich(activeHolder.value)) }
+function refresh() {
+    const h = activeHolder.value
+    if (h) load(h.service.id, { force: true }).then(() => { enrich(h); loadKeymanagerSettings(h) })
+}
 
 // On-chain holders (solo VC keys, Charon DV pubkeys) get beacon-state enrichment; shares don't.
 function enrich(h) {
     if (!h?.onChainStats) return
     const keys = state(h.service.id).keys
     if (keys?.length) loadStates(h.service.id, keys.map((k) => k.pubkey), beaconUrl.value)
+}
+
+// Fee recipient + graffiti come from the client itself, so they load for any solo VC regardless
+// of whether the keys are on chain yet.
+function loadKeymanagerSettings(h) {
+    if (!h?.soloEligible) return
+    const keys = state(h.service.id).keys
+    if (keys?.length) loadSettings(h.service.id, keys.map((k) => k.pubkey))
 }
 function openBeaconModal() { beaconDraft.value = beaconUrl.value; beaconModal.value = true }
 async function saveBeacon() {
@@ -405,8 +464,11 @@ async function saveBeacon() {
     try { await window.api.invoke('store-set', `statsBeaconUrl:${props.nodeId}`, beaconUrl.value) } catch { /* non-fatal */ }
     enrich(activeHolder.value) // re-read stats from the new source
 }
-function setFilter(key) { if (key !== 'All' && !statusKnown.value) return; filter.value = key; page.value = 1 }
-function toggleChip(key) { if (!statusKnown.value) return; chips[key] = !chips[key]; page.value = 1 }
+// "Select all N matching" is an affirmation of a specific set. If the filter changes, that set
+// changes underneath it, so the blanket selection is dropped and must be re-affirmed.
+function dropBlanketSelection() { allMatching.value = false }
+function setFilter(key) { if (key !== 'All' && !statusKnown.value) return; filter.value = key; page.value = 1; dropBlanketSelection() }
+function toggleChip(key) { if (!statusKnown.value) return; chips[key] = !chips[key]; page.value = 1; dropBlanketSelection() }
 function setSize(s) { size.value = s; page.value = 1 }
 
 function toggleRow(pubkey) {
@@ -422,17 +484,12 @@ function toggleAll() {
 }
 function clearSelection() { selected.clear(); allMatching.value = false; scope.value = 'all' }
 
-// Which rows a scope action applies to (Slice 0: read actions only).
-const scopeRows = computed(() => {
-    if (effectiveScope.value === 'selected') return rows.value.filter((r) => selected.has(r.pubkey))
-    if (effectiveScope.value === 'filtered') return visible.value
-    return rows.value
-})
+// Which rows a scope (bulk) action applies to. Always resolved from the same rule as the
+// count in the scope bar.
+const scopeRows = computed(() => scopeTargets({ ...scopeState.value, scope: effectiveScope.value }))
 
 function isActionDisabled(a, row) {
-    if (a.disabled || a.mutating) return true
-    if (a.needsIndex && (row ? row.index == null : true)) return true
-    return false
+    return actionDisabled(a, { row, soloEligible: soloEligible.value, graffitiSupported: graffitiSupported.value })
 }
 function copyPubkey(pubkey) { navigator.clipboard?.writeText(pubkey) }
 function openExplorer(row) { const url = explorerUrl(network.value, row.index); if (url) window.open(url, '_blank') }
@@ -446,17 +503,93 @@ function exportCsv(list) {
     URL.revokeObjectURL(url)
 }
 
-function runAction(id, row) {
+// The setting modal, and the keys it will write to. Held here rather than derived at apply
+// time so a filter or selection change mid-dialog cannot silently retarget the write.
+const settingModal = ref(null)   // { kind, pubkeys, current }
+const removeModal = ref(null)    // { pubkeys }
+
+function openSettingModal(kind, targets) {
+    const pubkeys = targets.map((r) => r.pubkey).filter(Boolean)
+    if (!pubkeys.length) return
+    settingModal.value = {
+        kind,
+        pubkeys,
+        // Pre-fill only for a single key; across many keys there is no one "current" value.
+        current: pubkeys.length === 1 ? (targets[0]?.[kind === 'graffiti' ? 'graffiti' : 'feeRecipient'] || '') : '',
+    }
+}
+
+function openRemoveModal(targets) {
+    const pubkeys = targets.map((r) => r.pubkey).filter(Boolean)
+    if (pubkeys.length) removeModal.value = { pubkeys }
+}
+
+async function applyRemove({ done }) {
+    let res
+    try {
+        res = await window.api.invoke('delete-validator-keys', props.nodeId, activeService.value.id, removeModal.value.pubkeys)
+    } catch (e) {
+        res = { ok: false, error: e?.message || 'The removal failed' }
+    }
+    done(res)
+}
+
+async function saveProtection({ content, done }) {
+    const service = shortName(activeService.value) || 'validator'
+    let res
+    try {
+        res = await window.api.invoke('save-slashing-protection', content, `slashing_protection-${service}.json`)
+    } catch (e) {
+        res = { ok: false, error: e?.message || 'Could not save the file' }
+    }
+    done(res)
+}
+
+function closeRemoveModal() {
+    removeModal.value = null
+    clearSelection()
+    // The removed keys are gone from the client, so the list must come from the client again.
+    refresh()
+}
+
+async function applySetting({ value, done }) {
+    const m = settingModal.value
+    const channel = m.kind === 'graffiti' ? 'set-graffiti' : 'set-fee-recipient'
+    let res
+    try {
+        res = await window.api.invoke(channel, props.nodeId, activeService.value.id, m.pubkeys, value)
+    } catch (e) {
+        res = { ok: false, error: e?.message || 'The update failed' }
+    }
+    done(res)
+    // Re-read from the client rather than trusting our own optimistic value: a partial failure
+    // means the table would otherwise show a value that was never actually applied.
+    if (res?.ok) loadKeymanagerSettings(activeHolder.value)
+}
+
+/**
+ * @param {string} id - action id from the capability sets
+ * @param {object|null} row - the row for a single-key action
+ * @param {boolean} bulk - true for scope-bar actions, which act on the whole scope
+ */
+function runAction(id, row, bulk = false) {
+    // A scope action operates on every row in scope. Reading `row` for one of those would
+    // silently act on a single key while the button says it applies to hundreds.
+    const targets = bulk ? scopeRows.value : (row ? [row] : [])
     switch (id) {
         case 'copyPubkey': copyPubkey(row.pubkey); break
         case 'copyPubkeys': navigator.clipboard?.writeText(scopeRows.value.map((r) => r.pubkey).join('\n')); break
         case 'viewBeaconcha': openExplorer(row); break
         case 'exportCsv': exportCsv(scopeRows.value); break
-        default: break // mutations / launchpad / cluster-details land in later slices
+        case 'setFeeRecipient': openSettingModal('feeRecipient', targets); break
+        case 'setGraffiti': openSettingModal('graffiti', targets); break
+        case 'removeKey':
+        case 'removeKeys': openRemoveModal(targets); break
+        default: break // exit / launchpad / cluster-details land in later slices
     }
 }
 function onRowAction({ id, row }) { runAction(id, row) }
-function onScopeAction(a) { if (!isActionDisabled(a, null)) runAction(a.id, scopeRows.value[0]) }
+function onScopeAction(a) { if (!isActionDisabled(a, null)) runAction(a.id, null, true) }
 function onDrawerAction(id) { if (detail.value) runAction(id, detail.value) }
 
 // Auto-select the first listable service on first open.

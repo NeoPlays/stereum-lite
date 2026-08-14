@@ -65,6 +65,10 @@ const { handlers, fakeStorage, fakeNode, fakeNodeManager, fakeTaskManager, fakeW
             restartChangedServices: vi.fn(),
             runFullUpdate: vi.fn(),
             streamServiceLogs: vi.fn(),
+            deleteValidatorKeys: vi.fn(),
+            getValidatorSettings: vi.fn(),
+            setFeeRecipient: vi.fn(),
+            setGraffiti: vi.fn(),
         },
         fakeNodeManager: {
             addNode: vi.fn(),
@@ -115,6 +119,7 @@ describe('ipcHandlers', () => {
     it('registers all expected channels', () => {
         expect(Object.keys(handlers).sort()).toEqual([
             'check-checkpoint-sync',
+            'delete-validator-keys',
             'disconnect-node',
             'fetch-updates-manifest',
             'get-all-nodes',
@@ -128,6 +133,7 @@ describe('ipcHandlers', () => {
             'get-system-metrics',
             'get-tasks',
             'get-upgradable-packages',
+            'get-validator-settings',
             'get-validator-states',
             'import-server-from-stereum',
             'list-validators',
@@ -135,8 +141,11 @@ describe('ipcHandlers', () => {
             'ping',
             'reconnect-node',
             'run-node-task',
+            'save-slashing-protection',
             'service-logs-start',
             'service-logs-stop',
+            'set-fee-recipient',
+            'set-graffiti',
             'ssh-login',
             'store-get',
             'store-set',

@@ -14,9 +14,15 @@ import {
 } from "@main/nodes/resync";
 import { buildCheckpointProbeScript, parseCheckpointResult } from "@main/nodes/checkpoint";
 import {
-    keymanagerInfo, keymanagerTarget, buildKeymanagerScript, wrapSidecar,
-    buildTokenReadCommand, parseToken, buildWeb3SignerScript,
+    keymanagerInfo, keymanagerTarget, keymanagerUrl, buildKeymanagerRequest, wrapSidecar,
+    buildCurlConfigBatch, buildBatchSidecarCommand, parseBatchResponses,
+    buildTokenReadCommand, parseToken, buildWeb3SignerRequest, keymanagerHttpError,
     parseKeymanagerResponse, parseKeystoresList, parseWeb3SignerPubkeys, validatorListable,
+    feeRecipientPath, graffitiPath, parseFeeRecipient, parseGraffiti,
+    isValidFeeRecipient, isValidGraffiti, graffitiByteLength, GRAFFITI_MAX_BYTES,
+    isWriteSuccess, isClearSuccess, isValidPubkey,
+    KEYSTORES_PATH, DELETE_OK_STATUSES, parseDeleteKeystoresResponse,
+    deleteErrors, deleteNotFound, protectionCoversAll,
 } from "@main/nodes/keymanager";
 import { buildClusterLockReadCommand, parseClusterLock } from "@main/nodes/dvt";
 import YAML from 'yaml';
@@ -283,8 +289,8 @@ export class Node {
      * its own pubkeys endpoint. Read-only. Returns `{ ok, keys:[{pubkey,readonly,derivationPath?}] }`
      * or a soft error object (never throws) so the tab can render a reason instead of a blank.
      *
-     * NOTE (v1): the bearer token is passed on the sidecar's curl command line (as stereum does),
-     * so it is briefly visible in the host process list - acceptable for a read, revisit for writes.
+     * The bearer token travels in the curl config piped over stdin, never on the command line,
+     * so it does not appear in the host process list.
      * @param {string} serviceId - the key-holding service (a *ValidatorService or Web3SignerService)
      */
     async listValidators(serviceId) {
@@ -306,25 +312,222 @@ export class Node {
 
         // Web3Signer: no bearer token, its own /api/v1/eth2/publicKeys endpoint.
         if (info.web3signer) {
-            const res = await this.sshService.exec(wrapSidecar(buildWeb3SignerScript(serviceId)), true, { timeoutMs: 20_000 })
+            const req = buildWeb3SignerRequest(serviceId)
+            const res = await this.sshService.exec(req.command, true, { timeoutMs: 20_000, input: req.input })
             const { httpCode, body } = parseKeymanagerResponse(res.stdout)
             if (httpCode !== 200) return { ok: false, error: httpCode ? `Web3Signer HTTP ${httpCode}` : 'Web3Signer unreachable', httpCode, keys: [] }
             return { ok: true, keys: parseWeb3SignerPubkeys(body) }
         }
 
-        // Validator client: read the bearer token, then GET /eth/v1/keystores.
-        const tokenCmd = buildTokenReadCommand({ id: serviceId, config })
-        if (!tokenCmd) return { ok: false, error: 'Could not resolve the keymanager token path', keys: [] }
-        const tokenRes = await this.sshService.exec(tokenCmd)
-        if (tokenRes.rc !== 0 && tokenRes.rc !== null) return { ok: false, error: 'Could not read the keymanager token (is the client running?)', keys: [] }
-        const token = parseToken(config.service, tokenRes.stdout)
+        // Validator client: GET /eth/v1/keystores, authenticated with the client's bearer token.
+        const r = await this._keymanagerRequest(serviceId, config, { method: 'GET', path: '/eth/v1/keystores' })
+        if (r.error) return { ok: false, error: r.error, keys: [] }
+        if (r.httpCode !== 200) return { ok: false, error: keymanagerHttpError(r), httpCode: r.httpCode, keys: [] }
+        return { ok: true, keys: parseKeystoresList(r.body) }
+    }
 
+    /** Read a validator client's keymanager bearer token. Returns `{ token }` or `{ error }`. */
+    async _keymanagerToken(serviceId, config) {
+        const tokenCmd = buildTokenReadCommand({ id: serviceId, config })
+        if (!tokenCmd) return { error: 'Could not resolve the keymanager token path' }
+        const res = await this.sshService.exec(tokenCmd)
+        if (res.rc !== 0 && res.rc !== null) return { error: 'Could not read the keymanager token (is the client running?)' }
+        return { token: parseToken(config.service, res.stdout) }
+    }
+
+    /**
+     * Run one authenticated keymanager request. The shared primitive behind every validator read
+     * and write: it reads the bearer token (unless one is passed in, so bulk callers read it once)
+     * and pipes the whole request as a curl config over stdin, keeping the token and any body out
+     * of the host's process list.
+     *
+     * `error` means we never got an answer (token unreadable, endpoint unresolvable). Otherwise
+     * `httpCode` carries the client's verdict - 0 when curl could not connect at all. Callers must
+     * judge success from `httpCode`, never from the exec's rc.
+     * @returns {Promise<{ httpCode?: number, body?: string, error?: string }>}
+     */
+    async _keymanagerRequest(serviceId, config, { method = 'GET', path, body, token, timeoutMs = 20_000 } = {}) {
+        let bearer = token
+        if (!bearer) {
+            const t = await this._keymanagerToken(serviceId, config)
+            if (t.error) return { error: t.error }
+            bearer = t.token
+        }
+        const req = buildKeymanagerRequest({
+            serviceId, target: keymanagerTarget(config), method, path, token: bearer, body,
+        })
+        if (!req) return { error: 'Could not resolve the keymanager endpoint' }
+        const res = await this.sshService.exec(req.command, true, { timeoutMs, input: req.input })
+        const parsed = parseKeymanagerResponse(res.stdout)
+        return { httpCode: parsed.httpCode, body: parsed.body }
+    }
+
+    /**
+     * Run one keymanager request PER pubkey in a single sidecar, returning the responses keyed by
+     * pubkey. Bulk actions can touch a thousand keys, so this must never become a loop of SSH
+     * execs. Reads the bearer token once and reuses it for every request in the batch.
+     * @param {(pubkey: string) => { method: string, path: string, body?: any }} makeRequest
+     * @returns {Promise<{ responses?: object, error?: string }>}
+     */
+    async _keymanagerBatch(serviceId, config, pubkeys, makeRequest, { timeoutMs = 60_000 } = {}) {
+        const t = await this._keymanagerToken(serviceId, config)
+        if (t.error) return { error: t.error }
         const target = keymanagerTarget(config)
-        const script = buildKeymanagerScript({ serviceId, ...target, method: 'GET', path: '/eth/v1/keystores', token })
-        const res = await this.sshService.exec(wrapSidecar(script), true, { timeoutMs: 20_000 })
-        const { httpCode, body } = parseKeymanagerResponse(res.stdout)
-        if (httpCode !== 200) return { ok: false, error: httpCode ? `Keymanager HTTP ${httpCode}` : 'Client API unreachable (running?)', httpCode, keys: [] }
-        return { ok: true, keys: parseKeystoresList(body) }
+        if (!target) return { error: 'Could not resolve the keymanager endpoint' }
+
+        const requests = []
+        for (const pubkey of pubkeys) {
+            // A malformed key would otherwise be interpolated straight into the URL path.
+            // Skipping it here surfaces as "No response from the client" for that key, which is
+            // the correct outcome: nothing was written for it.
+            if (!isValidPubkey(pubkey)) continue
+            const spec = makeRequest(pubkey)
+            const url = keymanagerUrl({ serviceId, scheme: target.scheme, port: target.port, path: spec.path })
+            if (!url) continue
+            const headers = { Authorization: `Bearer ${t.token}` }
+            if (spec.body !== undefined) headers['Content-Type'] = 'application/json'
+            requests.push({ key: pubkey, url, method: spec.method, headers, body: spec.body, insecure: target.insecure })
+        }
+        const input = buildCurlConfigBatch(requests)
+        if (!input) return { error: 'No valid keys to act on' }
+
+        const res = await this.sshService.exec(buildBatchSidecarCommand(), true, { timeoutMs, input })
+        return { responses: parseBatchResponses(res.stdout) }
+    }
+
+    /** Resolve a key-holding service's parsed config, or throw if it is not a keymanager client. */
+    async _validatorConfig(serviceId) {
+        const config = YAML.parse(await this.fetchRawServiceConfig(serviceId))
+        const info = keymanagerInfo(config)
+        if (!info.capable || info.web3signer) return { error: 'This service does not support validator settings' }
+        return { config }
+    }
+
+    /**
+     * Read the fee recipient and graffiti currently in effect for each pubkey. Read-only.
+     *
+     * Graffiti support is version-gated per client, so a 404 on the graffiti route is reported
+     * once as `graffitiSupported: false` rather than as a per-key error - that is what lets the
+     * UI hide the action on an older client instead of offering something that cannot work.
+     * @returns {Promise<{ ok, settings?: { [pubkey]: { feeRecipient, graffiti } }, graffitiSupported?, error? }>}
+     */
+    async getValidatorSettings(serviceId, pubkeys = []) {
+        const c = await this._validatorConfig(serviceId)
+        if (c.error) return { ok: false, error: c.error, settings: {} }
+        if (!pubkeys.length) return { ok: true, settings: {}, graffitiSupported: true }
+
+        const fee = await this._keymanagerBatch(serviceId, c.config, pubkeys, (pubkey) => ({ method: 'GET', path: feeRecipientPath(pubkey) }))
+        if (fee.error) return { ok: false, error: fee.error, settings: {} }
+        const graffiti = await this._keymanagerBatch(serviceId, c.config, pubkeys, (pubkey) => ({ method: 'GET', path: graffitiPath(pubkey) }))
+        if (graffiti.error) return { ok: false, error: graffiti.error, settings: {} }
+
+        let graffitiSupported = true
+        const settings = {}
+        for (const pubkey of pubkeys) {
+            const f = fee.responses[pubkey]
+            const g = graffiti.responses[pubkey]
+            const parsedFee = f ? parseFeeRecipient(f.httpCode, f.body) : { error: 'No response' }
+            const parsedGraffiti = g ? parseGraffiti(g.httpCode, g.body) : { error: 'No response' }
+            if (parsedGraffiti.unsupported) graffitiSupported = false
+            settings[pubkey] = {
+                feeRecipient: parsedFee.value ?? null,
+                graffiti: parsedGraffiti.value ?? null,
+            }
+        }
+        return { ok: true, settings, graffitiSupported }
+    }
+
+    /**
+     * Set or clear the fee recipient for a set of keys. Passing `address = null` clears the
+     * override, which restores the client's own default - it does NOT set the zero address.
+     * @returns {Promise<{ ok, results?: { [pubkey]: { ok, error? } }, error? }>}
+     */
+    async setFeeRecipient(serviceId, pubkeys = [], address = null) {
+        const clearing = address === null || address === ''
+        if (!clearing && !isValidFeeRecipient(address)) {
+            return { ok: false, error: 'Not a valid execution address' }
+        }
+        return this._applyValidatorWrite(serviceId, pubkeys, (pubkey) => (clearing
+            ? { method: 'DELETE', path: feeRecipientPath(pubkey) }
+            : { method: 'POST', path: feeRecipientPath(pubkey), body: { ethaddress: address } }
+        ), clearing)
+    }
+
+    /** Set or clear graffiti. `text = null` clears the override. Capped at 32 BYTES, not chars. */
+    async setGraffiti(serviceId, pubkeys = [], text = null) {
+        const clearing = text === null
+        if (!clearing && !isValidGraffiti(text)) {
+            return { ok: false, error: `Graffiti must be at most ${GRAFFITI_MAX_BYTES} bytes (this is ${graffitiByteLength(text)})` }
+        }
+        return this._applyValidatorWrite(serviceId, pubkeys, (pubkey) => (clearing
+            ? { method: 'DELETE', path: graffitiPath(pubkey) }
+            : { method: 'POST', path: graffitiPath(pubkey), body: { graffiti: text } }
+        ), clearing)
+    }
+
+    /**
+     * Remove keystores from a validator client and return the slashing-protection record the
+     * client hands back with them.
+     *
+     * This is the SAFE half of moving a key between hosts, and the ordering matters: the spec
+     * defines DELETE as "guarantee no further signing, THEN serialise the protection data". The
+     * opposite order - importing on the new host while the old one still signs - is the one
+     * mistake slashing protection provably cannot save you from, because each host's database is
+     * individually consistent and neither can see the other.
+     *
+     * The returned `slashingProtection` is the caller's only record of what these keys signed.
+     * It must be persisted before the operation is presented as complete. Repeating the delete is
+     * explicitly safe and re-returns the same data, which is the recovery path if the save fails.
+     *
+     * @returns {Promise<{ ok, results?, slashingProtection?, complete?, error?, httpCode? }>}
+     */
+    async deleteValidatorKeys(serviceId, pubkeys = []) {
+        const c = await this._validatorConfig(serviceId)
+        if (c.error) return { ok: false, error: c.error }
+        if (!pubkeys.length) return { ok: false, error: 'No keys selected' }
+
+        // Stopping many keys and serialising their history is slower than a settings write.
+        const r = await this._keymanagerRequest(serviceId, c.config, {
+            method: 'DELETE', path: KEYSTORES_PATH, body: { pubkeys }, timeoutMs: 120_000,
+        })
+        if (r.error) return { ok: false, error: r.error }
+        if (r.httpCode !== 200) return { ok: false, error: keymanagerHttpError(r), httpCode: r.httpCode }
+
+        const parsed = parseDeleteKeystoresResponse(r.body, pubkeys)
+        if (parsed.error) return { ok: false, error: parsed.error }
+
+        return {
+            ok: true,
+            results: parsed.results,
+            slashingProtection: parsed.slashingProtection,
+            // Surfaced so the UI can warn rather than imply the file is a full backup: keys the
+            // client never had contribute no history, and a key it could not stop is a hard stop.
+            failed: deleteErrors(parsed.results).map((x) => x.pubkey),
+            notFound: deleteNotFound(parsed.results).map((x) => x.pubkey),
+            complete: protectionCoversAll(
+                parsed.slashingProtection,
+                parsed.results.filter((x) => DELETE_OK_STATUSES.includes(x.status)).map((x) => x.pubkey),
+            ),
+        }
+    }
+
+    /** Shared tail of the per-key write ops: batch, then judge each response on its own status. */
+    async _applyValidatorWrite(serviceId, pubkeys, makeRequest, clearing) {
+        const c = await this._validatorConfig(serviceId)
+        if (c.error) return { ok: false, error: c.error }
+        if (!pubkeys.length) return { ok: false, error: 'No keys selected' }
+
+        const batch = await this._keymanagerBatch(serviceId, c.config, pubkeys, makeRequest)
+        if (batch.error) return { ok: false, error: batch.error }
+
+        const results = {}
+        for (const pubkey of pubkeys) {
+            const r = batch.responses[pubkey]
+            if (!r) { results[pubkey] = { ok: false, error: 'No response from the client' }; continue }
+            const succeeded = clearing ? isClearSuccess(r.httpCode) : isWriteSuccess(r.httpCode)
+            results[pubkey] = succeeded ? { ok: true } : { ok: false, error: keymanagerHttpError(r) }
+        }
+        return { ok: true, results }
     }
 
     /** Base URL of the first running consensus client's beacon REST API (`stereum-<id>:<port>`), or null. */

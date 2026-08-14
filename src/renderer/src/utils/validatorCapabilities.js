@@ -10,21 +10,26 @@
 //   'signer'      Web3Signer - remote keys, manage on the VC not here
 //   'ssv'         SSV operator - registration/exit are on-chain, off-node
 //
-// Each action carries flags the UI honors: `danger` (destructive styling), `mutating`
-// (writes on-node - disabled until the mutation pipeline lands), `needsIndex` (needs the
-// beacon index, so disabled until that data is fetched), `hint` (right-aligned menu hint).
+// Each action carries flags the UI honors: `danger` (destructive styling), `mutating` (writes
+// on-node), `implemented` (the pipeline behind it exists - a mutating action WITHOUT this is
+// rendered disabled with a "soon" hint), `needsGraffiti` (needs the client to expose the
+// graffiti route, which is version-gated), `needsIndex` (needs the beacon index, so disabled
+// until that data is fetched), `hint` (right-aligned menu hint).
+//
+// `mutating` is a statement about what the action does, not about whether it is available -
+// keep it set even once implemented, so anything reasoning about destructiveness stays correct.
 
 const A = {
-    setFeeRecipient: { id: 'setFeeRecipient', label: 'Set fee recipient', mutating: true },
-    setGraffiti:     { id: 'setGraffiti', label: 'Set graffiti', mutating: true },
+    setFeeRecipient: { id: 'setFeeRecipient', label: 'Set fee recipient', mutating: true, implemented: true },
+    setGraffiti:     { id: 'setGraffiti', label: 'Set graffiti', mutating: true, implemented: true, needsGraffiti: true },
     copyPubkey:      { id: 'copyPubkey', label: 'Copy full pubkey' },
     copyPubkeys:     { id: 'copyPubkeys', label: 'Copy pubkeys' },
     viewBeaconcha:   { id: 'viewBeaconcha', label: 'View on beaconcha.in', hint: 'open', needsIndex: true },
     exportCsv:       { id: 'exportCsv', label: 'Export CSV' },
     exitValidator:   { id: 'exitValidator', label: 'Exit validator', danger: true, mutating: true, hint: 'irreversible' },
-    removeKey:       { id: 'removeKey', label: 'Remove key', danger: true, mutating: true, hint: 'keeps validator active' },
+    removeKey:       { id: 'removeKey', label: 'Remove key', danger: true, mutating: true, implemented: true, hint: 'keeps validator active' },
     exitValidators:  { id: 'exitValidators', label: 'Exit validators', danger: true, mutating: true },
-    removeKeys:      { id: 'removeKeys', label: 'Remove keys', danger: true, mutating: true },
+    removeKeys:      { id: 'removeKeys', label: 'Remove keys', danger: true, mutating: true, implemented: true },
     clusterDetails:  { id: 'clusterDetails', label: 'Cluster details' },
     exitViaLaunchpad:{ id: 'exitViaLaunchpad', label: 'Exit via Launchpad', hint: 'multi-party', disabled: true },
     openLaunchpad:   { id: 'openLaunchpad', label: 'Open in Launchpad', hint: 'open' },
@@ -71,6 +76,33 @@ const EMPTY = { rowActions: [], scopeActions: [], drawerActions: [], note: '' }
 export function capabilityFor(role, clientName = '') {
     const cap = CAPABILITIES[role] || EMPTY
     return { ...cap, note: cap.note.replace('{client}', clientName) }
+}
+
+/**
+ * Single source of truth for whether an action may be clicked. The row menu, the scope bar, and
+ * the detail drawer all defer to this - they used to each carry their own copy of the rule, which
+ * is exactly how a mutating action ends up enabled in one surface and disabled in another.
+ *
+ * @param {object} action - an entry from the capability sets above
+ * @param {{ row?: object, soloEligible?: boolean, graffitiSupported?: boolean }} ctx
+ */
+export function actionDisabled(action, { row = null, soloEligible = true, graffitiSupported = true } = {}) {
+    if (!action || action.disabled) return true
+    // A mutating action needs both a pipeline behind it and a setup we may act on alone.
+    if (action.mutating && (!action.implemented || !soloEligible)) return true
+    if (action.needsGraffiti && !graffitiSupported) return true
+    if (action.needsIndex && (!row || row.index == null)) return true
+    return false
+}
+
+/** The muted hint shown beside an action, explaining why it is unavailable when it is. */
+export function actionHint(action, { row = null, soloEligible = true, graffitiSupported = true } = {}) {
+    if (!action) return ''
+    if (action.mutating && !action.implemented) return 'soon'
+    if (action.mutating && !soloEligible) return 'multi-party'
+    if (action.needsGraffiti && !graffitiSupported) return 'unsupported'
+    if (action.needsIndex && (!row || row.index == null)) return 'no index'
+    return action.hint || ''
 }
 
 // beaconcha.in host per network (index-keyed validator page). Unknown networks -> null.
