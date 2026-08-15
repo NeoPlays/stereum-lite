@@ -162,6 +162,10 @@ export class SSHService {
             command = "sudo " + command
         }
         log.debug('%cCOMMAND:%c', 'color: yellow', 'color: unset', command)
+        // The executor is async because it awaits _getConnection before wiring the stream.
+        // Restructuring that touches every SSH call path in the app, so it stays as-is rather
+        // than being changed as a side effect of an unrelated feature.
+        // eslint-disable-next-line no-async-promise-executor
         return new Promise(async (resolve, reject) => {
             let sshConn
             try {

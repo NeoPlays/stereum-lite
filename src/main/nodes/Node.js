@@ -806,7 +806,7 @@ export class Node {
     }
 
     /** Sub-task group heading for a playbook run; state + short id keeps parallel restarts distinguishable. */
-    _playbookLabel(role, stereumArgs = {}, topLevelVars = {}) {
+    _playbookLabel(role, stereumArgs = {}) {
         if (role === 'manage-service') {
             const svc = stereumArgs.manage_service || {}
             const verb = { started: 'Start', stopped: 'Stop', restarted: 'Restart' }[svc.state] || 'Manage'

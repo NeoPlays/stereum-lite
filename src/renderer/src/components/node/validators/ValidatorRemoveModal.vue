@@ -99,7 +99,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-const props = defineProps({
+defineProps({
     pubkeys: { type: Array, default: () => [] },
     clientName: { type: String, default: '' },
 })

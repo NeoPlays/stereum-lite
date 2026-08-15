@@ -13,7 +13,6 @@ describe('useNodeMetrics', () => {
     })
 
     const sysCalls = () => invoke.mock.calls.filter((c) => c[0] === 'get-system-metrics').length
-    const cliCalls = () => invoke.mock.calls.filter((c) => c[0] === 'get-client-metrics').length
     const diskCalls = () => invoke.mock.calls.filter((c) => c[0] === 'get-disk-usage').length
 
     it('fetches both channels immediately on start and stores the results', async () => {

@@ -1025,20 +1025,6 @@ describe('Node', () => {
         const PK_A = '0x' + 'a'.repeat(96)
         const PK_B = '0x' + 'b'.repeat(96)
 
-        // exec order for these ops: [0] read the service yaml, [1] read the bearer token,
-        // then one batched sidecar per keymanager route.
-        function wire(...batchStdouts) {
-            let call = 0
-            node.sshService.exec = vi.fn(async () => {
-                const i = call++
-                if (i === 0) return ok(VC_YAML)
-                if (i === 1) return ok('TOKEN\n')
-                const stdout = batchStdouts.shift() ?? ''
-                // every batch re-reads the token first
-                return ok(stdout)
-            })
-        }
-
         it('sends the bearer token over stdin, never on the command line', async () => {
             const calls = []
             node.sshService.exec = vi.fn(async (cmd, sudo, opts) => {

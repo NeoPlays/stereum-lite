@@ -3,10 +3,15 @@ import eslintConfigPrettier from '@electron-toolkit/eslint-config-prettier'
 import eslintPluginVue from 'eslint-plugin-vue'
 
 export default [
+    // `indent` is a RULE, so it has to sit under `rules`. As a bare top-level key it made
+    // ESLint 10 reject the whole config with "Unexpected key indent found", which took the
+    // lint script out entirely rather than just skipping the rule.
     {
-        indent: ['error', 4]
+        rules: {
+            indent: ['error', 4]
+        }
     },
-    { ignores: ['**/node_modules', '**/dist', '**/out'] },
+    { ignores: ['**/node_modules', '**/dist', '**/out', '**/docs', '**/test-keystores'] },
     eslintConfig,
     ...eslintPluginVue.configs['flat/recommended'],
     {

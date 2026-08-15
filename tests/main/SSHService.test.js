@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { EventEmitter } from 'events'
 
 vi.mock('fs', () => {
     const readFileSync = vi.fn(() => 'KEY')
@@ -18,8 +17,8 @@ const { FakeClient, FakeStream } = vi.hoisted(() => {
             FakeClient.instances.push(this)
             this.connectArgs = []
             this.connect = (...a) => { this.connectArgs.push(a) }
-            this.end = (..._a) => {}
-            this.exec = (..._a) => {} // overridden per-test
+            this.end = () => {}
+            this.exec = () => {} // overridden per-test
         }
     }
     FakeClient.instances = []
@@ -246,14 +245,12 @@ describe('SSHService', () => {
 
     describe('execStream', () => {
         function streamingConn() {
-            let cbStream
             const stream = new FakeStream()
             stream.close = vi.fn(() => stream.emit('close', null))
             const conn = {
                 conn: {
                     exec: vi.fn((cmd, cb) => {
-                        cbStream = stream
-                        cb(null, stream)
+                            cb(null, stream)
                     }),
                 },
                 sessionCount: 0,

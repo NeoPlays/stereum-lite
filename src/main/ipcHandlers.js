@@ -5,7 +5,6 @@ import nodeManager from "@main/nodes/NodeManager"
 import taskManager from "@main/tasks/TaskManager"
 import { Node } from "@main/nodes/Node";
 import log from 'electron-log'
-import _ from 'lodash'
 import { randomUUID } from 'crypto'
 
 const logSessions = new Map() // sessionId -> { handle, nodeId }

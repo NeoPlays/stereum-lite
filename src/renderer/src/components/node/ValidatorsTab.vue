@@ -214,7 +214,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { classifyValidatorSetup, SOLO_VC_TYPES, holdsOnChainValidators, isSoloEligible } from '@renderer/utils/validatorSetup'
 import { capabilityFor, explorerUrl, actionDisabled } from '@renderer/utils/validatorCapabilities'
 import { useValidatorKeys } from '@renderer/composables/useValidatorKeys'
-import { scopeTargets, selectionCount, effectiveScopeOf, scopeCountOf } from '@renderer/utils/validatorScope'
+import { scopeTargets, effectiveScopeOf, scopeCountOf } from '@renderer/utils/validatorScope'
 import ValidatorTable from './validators/ValidatorTable.vue'
 import ValidatorDetailDrawer from './validators/ValidatorDetailDrawer.vue'
 import ValidatorSettingModal from './validators/ValidatorSettingModal.vue'
@@ -394,7 +394,6 @@ const scopeState = computed(() => ({
     visible: visible.value,
     selected,
 }))
-const selectedCount = computed(() => selectionCount(scopeState.value))
 const effectiveScope = computed(() => effectiveScopeOf(scopeState.value))
 const scopeCount = computed(() => scopeCountOf(scopeState.value))
 const scopeNoun = computed(() => (activeHolder.value?.role === 'distributed' ? 'DV' : 'key'))

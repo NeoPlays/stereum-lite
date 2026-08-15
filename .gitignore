@@ -93,3 +93,7 @@ typings/
 out/
 
 docs/
+
+# Generated test validator keystores (throwaway keys + their mnemonic).
+# Never commit key material, even for a testnet.
+test-keystores/

@@ -1,5 +1,6 @@
 // ANSI handling for log rendering: only SGR ('m') affects styling; other CSI sequences are stripped silently.
 
+// eslint-disable-next-line no-control-regex -- matching the ESC control character is the job here
 const CSI = /\x1b\[[0-9;]*[a-zA-Z]/g
 
 const FG = {
@@ -33,6 +34,7 @@ export function stripAnsi(s) {
  */
 export function parseAnsi(line) {
     const segments = []
+    // eslint-disable-next-line no-control-regex -- matching the ESC control character is the job here
     const re = /\x1b\[([0-9;]*)([a-zA-Z])/g
     let last = 0
     let style = emptyStyle()
