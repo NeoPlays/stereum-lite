@@ -83,6 +83,8 @@ export function initializeIpcHandlers() {
 
     // IPC NodeManager
     ipcMain.handle('ssh-login', (_, credentials) => {
+        const trim = (v) => (typeof v === 'string' ? v.trim() : v)
+        credentials = { ...credentials, host: trim(credentials.host), username: trim(credentials.username) }
         const existing = nodeManager.findNodeByEndpoint(credentials.host, credentials.port, credentials.username)
         if (existing) {
             return Promise.resolve({

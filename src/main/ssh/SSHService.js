@@ -6,11 +6,11 @@ import crypto from 'crypto'
 export class SSHParams {
     constructor(host, port, username, password, privateKey, passphrase) {
         this.name = ""
-        this.host = host
+        this.host = typeof host === 'string' ? host.trim() : host
         this.port = port
-        this.username = username
+        this.username = typeof username === 'string' ? username.trim() : username
         this.password = password
-        this.privateKey = readFileSync(privateKey, 'utf8')
+        this.privateKey = readFileSync(typeof privateKey === 'string' ? privateKey.trim() : privateKey, 'utf8')
         this.passphrase = passphrase
     }
 
