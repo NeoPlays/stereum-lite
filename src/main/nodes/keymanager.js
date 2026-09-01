@@ -362,6 +362,52 @@ export function keymanagerHttpError({ httpCode, body } = {}, fallback = 'Client 
 
 export const KEYSTORES_PATH = '/eth/v1/keystores'
 
+// Spec statuses for an import. There is NO `skipped` despite the name appearing in some docs;
+// Prysm's SDK additionally emits a non-standard `unknown`, so anything unrecognised is treated
+// as an error rather than assumed benign.
+export const IMPORT_STATUSES = ['imported', 'duplicate', 'error']
+
+/**
+ * Build the POST /eth/v1/keystores body.
+ *
+ * `keystores` and `slashing_protection` are JSON-serialised STRINGS, not objects - passing objects
+ * is accepted by JSON.stringify and rejected by every client. `passwords[i]` unlocks `keystores[i]`
+ * strictly positionally, so a length mismatch is a 400 rather than a partial import.
+ */
+export function buildImportBody(keystores = [], passwords = [], slashingProtection = null) {
+    const body = { keystores, passwords }
+    if (typeof slashingProtection === 'string' && slashingProtection.trim() !== '') {
+        body.slashing_protection = slashingProtection
+    }
+    return body
+}
+
+/**
+ * Parse POST /eth/v1/keystores.
+ *
+ * Like the delete response, `data[]` carries no pubkey, so entries correlate to the REQUEST order
+ * by index and nothing else. A length mismatch is refused rather than zipped, because attributing
+ * one keystore's outcome to another is how a failed import gets reported as a success.
+ */
+export function parseImportKeystoresResponse(body, pubkeys = []) {
+    let json
+    try { json = JSON.parse(body) } catch { return { error: 'Unreadable import response' } }
+    const data = json?.data
+    if (!Array.isArray(data)) return { error: 'Import response had no results' }
+    if (data.length !== pubkeys.length) {
+        return { error: `Client returned ${data.length} results for ${pubkeys.length} keystores` }
+    }
+    const results = pubkeys.map((pubkey, i) => {
+        const status = String(data[i]?.status ?? 'error')
+        return {
+            pubkey,
+            status: IMPORT_STATUSES.includes(status) ? status : 'error',
+            message: data[i]?.message ?? (IMPORT_STATUSES.includes(status) ? '' : `Unexpected status "${status}"`),
+        }
+    })
+    return { results }
+}
+
 // Spec statuses for a delete. `not_active` means the key was present but not actively signing,
 // which still yields protection data and is NOT a failure. `error` means the key was found and
 // could NOT be stopped - the one status that must block any follow-on import, because the key

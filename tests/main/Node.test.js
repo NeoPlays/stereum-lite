@@ -1237,6 +1237,120 @@ describe('Node', () => {
         })
     })
 
+    describe('importValidatorKeys', () => {
+        const VC_YAML = 'service: LighthouseValidatorService\ncommand:\n  - --http\n'
+        const PK_A = '0x' + 'a'.repeat(96)
+        const keystore = (pubkey) => JSON.stringify({ pubkey: pubkey.replace(/^0x/, ''), crypto: {} })
+        const BEACON_CTX = '{"data":{"genesis_validators_root":"0xbeef"}}\n===BCTX===\n{"data":{"head_slot":"32000","is_syncing":false,"is_optimistic":false}}'
+
+        // Dispatch on the command, not on call order: the real sequence includes service discovery,
+        // and an index-based mock silently feeds the wrong payload to the wrong reader.
+        function wire({ keymanagerBody = '', keymanagerCode = 200 } = {}) {
+            const inputs = []
+            node.sshService.exec = vi.fn(async (cmd, sudo, opts) => {
+                if (opts?.input) inputs.push(opts.input)
+                if (cmd.includes('cat /etc/stereum/services/')) return ok(VC_YAML)
+                if (cmd.startsWith('docker exec') || cmd.includes(' docker exec')) return ok('TOKEN')
+                if (opts?.input?.includes('/eth/v1/beacon/genesis') || cmd.includes('beacon/genesis')) return ok(BEACON_CTX)
+                return ok(`${keymanagerBody}\n${keymanagerCode}`)
+            })
+            vi.spyOn(node, '_resolveInternalBeaconBase').mockResolvedValue('http://beacon:5052')
+            return inputs
+        }
+
+        it('refuses a protection-less import that was not explicitly acknowledged', async () => {
+            wire()
+            const r = await node.importValidatorKeys('svc', [keystore(PK_A)], ['pw'], null)
+            expect(r.ok).toBe(false)
+            expect(r.error).toContain('never signed')
+        })
+
+        it('refuses when passwords and keystores do not line up', async () => {
+            wire()
+            const r = await node.importValidatorKeys('svc', [keystore(PK_A), keystore(PK_A)], ['pw'], null, { acknowledgedNeverSigned: true })
+            expect(r.ok).toBe(false)
+            expect(r.error).toContain('exactly one password')
+        })
+
+        it('blocks a protection file from another chain', async () => {
+            const protection = JSON.stringify({
+                metadata: { interchange_format_version: '5', genesis_validators_root: '0xdead' },
+                data: [{ pubkey: PK_A, signed_blocks: [], signed_attestations: [] }],
+            })
+            const inputs = wire()
+            const r = await node.importValidatorKeys('svc', [keystore(PK_A)], ['pw'], protection)
+            expect(r.ok).toBe(false)
+            expect(r.error).toContain('Wrong chain')
+            // Refused before anything was sent to the client.
+            expect(inputs.some((i) => i.includes('/eth/v1/keystores'))).toBe(false)
+        })
+
+        it('sends keystores and passwords over stdin and reports per-key status', async () => {
+            const inputs = wire({ keymanagerBody: JSON.stringify({ data: [{ status: 'imported' }] }) })
+            const r = await node.importValidatorKeys('svc', [keystore(PK_A)], ['hunter2'], null, { acknowledgedNeverSigned: true })
+            expect(r.ok).toBe(true)
+            expect(r.results[0]).toMatchObject({ pubkey: PK_A, status: 'imported' })
+            const importCall = node.sshService.exec.mock.calls.find((c) => c[2]?.input?.includes('/eth/v1/keystores'))
+            expect(importCall[0]).not.toContain('hunter2')
+            expect(inputs.some((i) => i.includes('hunter2'))).toBe(true)
+        })
+
+        it('treats a status the client invented as an error, never a success', async () => {
+            wire({ keymanagerBody: JSON.stringify({ data: [{ status: 'unknown' }] }) })
+            const r = await node.importValidatorKeys('svc', [keystore(PK_A)], ['pw'], null, { acknowledgedNeverSigned: true })
+            expect(r.results[0].status).toBe('error')
+        })
+    })
+
+    describe('submitVoluntaryExit', () => {
+        const VC_YAML = 'service: LighthouseValidatorService\ncommand:\n  - --http\n'
+        const PK_A = '0x' + 'a'.repeat(96)
+
+        it('never signs or broadcasts for a validator that failed preflight', async () => {
+            const inputs = []
+            // Activated at epoch 999 with head slot 32000 (epoch 1000): only 1 epoch old, so the
+            // 256-epoch activation period blocks it.
+            node.sshService.exec = vi.fn(async (cmd, sudo, opts) => {
+                if (opts?.input) inputs.push(opts.input)
+                if (cmd.includes('cat /etc/stereum/services/')) return ok(VC_YAML)
+                if (cmd.startsWith('docker exec')) return ok('TOKEN')
+                if (opts?.input?.includes('beacon/genesis') || cmd.includes('beacon/genesis')) {
+                    return ok('{"data":{"genesis_validators_root":"0xbeef"}}\n===BCTX===\n{"data":{"head_slot":"32000","is_syncing":false,"is_optimistic":false}}')
+                }
+                return ok(`{"data":[{"index":"1","status":"active_ongoing","balance":"32000000000","validator":{"pubkey":"${PK_A}","activation_epoch":"999","withdrawal_credentials":"0x0100"}}]}\n===VSTATE_HTTP===200\n===VSTATE_CHUNK===\n`)
+            })
+            vi.spyOn(node, '_resolveInternalBeaconBase').mockResolvedValue('http://beacon:5052')
+
+            const r = await node.submitVoluntaryExit('svc', [PK_A])
+            expect(r.ok).toBe(true)
+            expect(r.results[PK_A].ok).toBe(false)
+            expect(r.results[PK_A].error).toContain('activated too recently')
+            // The irreversible part never ran.
+            expect(inputs.some((i) => i.includes('voluntary_exit'))).toBe(false)
+            expect(inputs.some((i) => i.includes('pool/voluntary_exits'))).toBe(false)
+        })
+    })
+
+    describe('getBeaconContext', () => {
+        it('reads the chain root and head epoch from the node beacon', async () => {
+            node.sshService.exec = vi.fn(async () =>
+                ok('{"data":{"genesis_validators_root":"0xbeef"}}\n===BCTX===\n{"data":{"head_slot":"640","is_syncing":false,"is_optimistic":false}}'))
+            vi.spyOn(node, '_resolveInternalBeaconBase').mockResolvedValue('http://beacon:5052')
+            const r = await node.getBeaconContext()
+            expect(r.ok).toBe(true)
+            expect(r.genesisValidatorsRoot).toBe('0xbeef')
+            expect(r.currentEpoch).toBe(20)   // 640 / 32
+            expect(r.syncing).toBe(false)
+        })
+
+        it('reports failure when the beacon answers nothing usable', async () => {
+            node.sshService.exec = vi.fn(async () => ok('not json'))
+            vi.spyOn(node, '_resolveInternalBeaconBase').mockResolvedValue('http://beacon:5052')
+            const r = await node.getBeaconContext()
+            expect(r.ok).toBe(false)
+        })
+    })
+
     describe('toDTO status field', () => {
         it('includes the current status in the full DTO', async () => {
             node._setStatus('connected')

@@ -1,5 +1,6 @@
 import { ipcMain, BrowserWindow, dialog, net } from "electron";
-import { writeFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
+import { basename } from "path";
 import storage from "@main/store/StoreService"
 import nodeManager from "@main/nodes/NodeManager"
 import taskManager from "@main/tasks/TaskManager"
@@ -322,6 +323,72 @@ export function initializeIpcHandlers() {
         } catch (error) {
             log.error('set-graffiti error:', error)
             return { ok: false, error: error.message || 'set-graffiti failed' }
+        }
+    });
+
+    // Read JSON files the user picks (keystores, or an EIP-3076 interchange). Contents come back
+    // to the renderer so it can show what was selected and validate before anything is sent.
+    ipcMain.handle('pick-json-files', async (_, { multi = false, title = 'Select file' } = {}) => {
+        try {
+            const win = BrowserWindow.getFocusedWindow()
+            const opts = {
+                title,
+                properties: multi ? ['openFile', 'multiSelections', 'dontAddToRecent'] : ['openFile', 'dontAddToRecent'],
+                filters: [{ name: 'JSON', extensions: ['json'] }],
+            }
+            const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
+            if (result.canceled || !result.filePaths?.length) return { ok: false, canceled: true }
+            const files = result.filePaths.map((p) => ({ name: basename(p), content: readFileSync(p, 'utf8') }))
+            return { ok: true, files }
+        } catch (error) {
+            log.error('pick-json-files error:', error)
+            return { ok: false, error: error.message || 'Could not read the selected file' }
+        }
+    });
+
+    ipcMain.handle('validate-slashing-protection', async (_, nodeId, content, pubkeys) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.validateSlashingProtection(content, pubkeys)
+        } catch (error) {
+            log.error('validate-slashing-protection error:', error)
+            return { ok: false, error: error.message || 'Could not validate the file' }
+        }
+    });
+
+    ipcMain.handle('import-validator-keys', async (_, nodeId, serviceId, keystores, passwords, slashingProtection, opts) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.importValidatorKeys(serviceId, keystores, passwords, slashingProtection, opts || {})
+        } catch (error) {
+            log.error('import-validator-keys error:', error)
+            return { ok: false, error: error.message || 'import-validator-keys failed' }
+        }
+    });
+
+    ipcMain.handle('get-exit-preflight', async (_, nodeId, serviceId, pubkeys, beaconUrl) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.getExitPreflight(serviceId, pubkeys, { beaconUrl })
+        } catch (error) {
+            log.error('get-exit-preflight error:', error)
+            return { ok: false, error: error.message || 'get-exit-preflight failed', checks: {} }
+        }
+    });
+
+    // Irreversible. Note the signed exit message never crosses this boundary: it is a bearer
+    // credential that would let anyone holding it exit the validator later, so it stays in main.
+    ipcMain.handle('submit-voluntary-exit', async (_, nodeId, serviceId, pubkeys, beaconUrl) => {
+        try {
+            const node = nodeManager.findNode(nodeId)
+            if (!node) throw new Error('Node not found')
+            return await node.submitVoluntaryExit(serviceId, pubkeys, { beaconUrl })
+        } catch (error) {
+            log.error('submit-voluntary-exit error:', error)
+            return { ok: false, error: error.message || 'submit-voluntary-exit failed' }
         }
     });
 

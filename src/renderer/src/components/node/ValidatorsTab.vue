@@ -18,7 +18,12 @@
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5" /></svg>
                         Refresh
                     </button>
-                    <button class="btn-accent" disabled title="Coming soon">Import keys</button>
+                    <button
+                        class="btn-accent"
+                        :disabled="!soloEligible"
+                        :title="soloEligible ? 'Import validator keystores' : 'Only a solo validator client can import keys here'"
+                        @click="importModal = true"
+                    >Import keys</button>
                 </div>
             </header>
 
@@ -166,6 +171,25 @@
         />
 
         <Teleport to="body">
+            <ValidatorImportModal
+                v-if="importModal"
+                :client-name="shortName(activeService)"
+                :network="network"
+                @close="closeImportModal"
+                @pick-keystores="({ done }) => pickJsonFiles(true, 'Select validator keystores', done)"
+                @pick-protection="({ done }) => pickJsonFiles(false, 'Select slashing protection file', done)"
+                @validate="validateProtection"
+                @apply="applyImport"
+            />
+            <ValidatorExitModal
+                v-if="exitModal"
+                :rows="exitModal.rows"
+                :client-name="shortName(activeService)"
+                :network="network"
+                @close="closeExitModal"
+                @preflight="exitPreflight"
+                @apply="applyExit"
+            />
             <ValidatorRemoveModal
                 v-if="removeModal"
                 :pubkeys="removeModal.pubkeys"
@@ -219,6 +243,8 @@ import ValidatorTable from './validators/ValidatorTable.vue'
 import ValidatorDetailDrawer from './validators/ValidatorDetailDrawer.vue'
 import ValidatorSettingModal from './validators/ValidatorSettingModal.vue'
 import ValidatorRemoveModal from './validators/ValidatorRemoveModal.vue'
+import ValidatorImportModal from './validators/ValidatorImportModal.vue'
+import ValidatorExitModal from './validators/ValidatorExitModal.vue'
 
 const props = defineProps({
     services: { type: Array, default: () => [] },
@@ -506,6 +532,8 @@ function exportCsv(list) {
 // time so a filter or selection change mid-dialog cannot silently retarget the write.
 const settingModal = ref(null)   // { kind, pubkeys, current }
 const removeModal = ref(null)    // { pubkeys }
+const importModal = ref(false)
+const exitModal = ref(null)      // { rows }
 
 function openSettingModal(kind, targets) {
     const pubkeys = targets.map((r) => r.pubkey).filter(Boolean)
@@ -542,6 +570,65 @@ async function saveProtection({ content, done }) {
         res = { ok: false, error: e?.message || 'Could not save the file' }
     }
     done(res)
+}
+
+function openExitModal(targets) {
+    if (targets.length) exitModal.value = { rows: targets }
+}
+
+async function pickJsonFiles(multi, title, done) {
+    try { done(await window.api.invoke('pick-json-files', { multi, title })) }
+    catch (e) { done({ ok: false, error: e?.message || 'Could not read the file' }) }
+}
+
+async function validateProtection({ protection, pubkeys, done }) {
+    // Validation runs in the main process because only it knows the node's genesis validators
+    // root, which is what proves the file belongs to this chain.
+    try {
+        done(await window.api.invoke('validate-slashing-protection', props.nodeId, protection, pubkeys))
+    } catch (e) {
+        done({ ok: false, error: e?.message || 'Could not validate the file' })
+    }
+}
+
+async function applyImport({ keystores, passwords, slashingProtection, acknowledgedNeverSigned, done }) {
+    let res
+    try {
+        res = await window.api.invoke('import-validator-keys', props.nodeId, activeService.value.id,
+            keystores, passwords, slashingProtection, { acknowledgedNeverSigned })
+    } catch (e) {
+        res = { ok: false, error: e?.message || 'The import failed' }
+    }
+    done(res)
+}
+
+function closeImportModal() {
+    importModal.value = false
+    refresh()
+}
+
+async function exitPreflight({ pubkeys, done }) {
+    try {
+        done(await window.api.invoke('get-exit-preflight', props.nodeId, activeService.value.id, pubkeys, beaconUrl.value || null))
+    } catch (e) {
+        done({ ok: false, error: e?.message || 'Could not check exit eligibility', checks: {} })
+    }
+}
+
+async function applyExit({ pubkeys, done }) {
+    let res
+    try {
+        res = await window.api.invoke('submit-voluntary-exit', props.nodeId, activeService.value.id, pubkeys, beaconUrl.value || null)
+    } catch (e) {
+        res = { ok: false, error: e?.message || 'The exit submission failed' }
+    }
+    done(res)
+}
+
+function closeExitModal() {
+    exitModal.value = null
+    clearSelection()
+    refresh()
 }
 
 function closeRemoveModal() {
@@ -584,6 +671,8 @@ function runAction(id, row, bulk = false) {
         case 'setGraffiti': openSettingModal('graffiti', targets); break
         case 'removeKey':
         case 'removeKeys': openRemoveModal(targets); break
+        case 'exitValidator':
+        case 'exitValidators': openExitModal(targets); break
         default: break // exit / launchpad / cluster-details land in later slices
     }
 }

@@ -21,10 +21,16 @@ import {
     feeRecipientPath, graffitiPath, parseFeeRecipient, parseGraffiti,
     isValidFeeRecipient, isValidGraffiti, graffitiByteLength, GRAFFITI_MAX_BYTES,
     isWriteSuccess, isClearSuccess, isValidPubkey,
+    buildCurlConfig, buildSidecarStdinCommand, buildImportBody, parseImportKeystoresResponse,
     KEYSTORES_PATH, DELETE_OK_STATUSES, parseDeleteKeystoresResponse,
     deleteErrors, deleteNotFound, protectionCoversAll,
 } from "@main/nodes/keymanager";
 import { buildClusterLockReadCommand, parseClusterLock } from "@main/nodes/dvt";
+import { validateInterchange } from "@main/nodes/slashingProtection";
+import {
+    epochFromSlot, exitEligibility, parseSignedExit, exitBroadcastBody,
+    isExitAccepted, exitStatusMessage, VOLUNTARY_EXIT_PATH, EXIT_POOL_PATH,
+} from "@main/nodes/voluntaryExit";
 import YAML from 'yaml';
 import { randomUUID } from "crypto";
 import log from 'electron-log';
@@ -509,6 +515,205 @@ export class Node {
                 parsed.results.filter((x) => DELETE_OK_STATUSES.includes(x.status)).map((x) => x.pubkey),
             ),
         }
+    }
+
+    /**
+     * Chain context needed to judge an import or an exit: which chain this node is on, how far
+     * along it is, and whether its view can be trusted. Read from the node's own beacon (or the
+     * stats-beacon override) in one sidecar.
+     *
+     * `genesisValidatorsRoot` is what makes a slashing-protection file verifiable: a file from
+     * another chain describes signatures that never happened here.
+     * @returns {Promise<{ ok, genesisValidatorsRoot?, currentEpoch?, syncing?, optimistic?, error? }>}
+     */
+    async getBeaconContext({ beaconUrl } = {}) {
+        const override = beaconUrl ? normalizeBeaconUrl(beaconUrl) : null
+        if (beaconUrl && !override) return { ok: false, error: 'Invalid beacon URL' }
+        const base = override || await this._resolveInternalBeaconBase()
+        if (!base) return { ok: false, error: 'No running consensus client on this node and no stats beacon set' }
+
+        const script = [
+            `curl -sS -m 10 '${base}/eth/v1/beacon/genesis' -w '\\n===BCTX===\\n'`,
+            `curl -sS -m 10 '${base}/eth/v1/node/syncing'`,
+        ].join(' ; ')
+        const res = await this.sshService.exec(wrapSidecar(script), true, { timeoutMs: 30_000 })
+        const [genesisRaw = '', syncingRaw = ''] = String(res.stdout ?? '').split('===BCTX===')
+
+        let genesisValidatorsRoot = null
+        try { genesisValidatorsRoot = JSON.parse(genesisRaw.trim())?.data?.genesis_validators_root ?? null } catch { /* left null */ }
+
+        let currentEpoch = null
+        let syncing = false
+        let optimistic = false
+        try {
+            const d = JSON.parse(syncingRaw.trim())?.data
+            currentEpoch = epochFromSlot(d?.head_slot)
+            // Absent flags are treated as "not syncing" only because every client sets them; a
+            // missing head_slot is what actually blocks an exit, and that is checked separately.
+            syncing = d?.is_syncing === true || d?.is_syncing === 'true'
+            optimistic = d?.is_optimistic === true || d?.is_optimistic === 'true'
+        } catch { /* left as unknown */ }
+
+        if (genesisValidatorsRoot === null && currentEpoch === null) {
+            return { ok: false, error: 'Beacon node did not answer (is it reachable and synced?)' }
+        }
+        return { ok: true, genesisValidatorsRoot, currentEpoch, syncing, optimistic }
+    }
+
+    /**
+     * Check a slashing-protection file against this node's chain and the keys being imported.
+     *
+     * `ok` means the check RAN, not that the file passed - failures are in `errors`. Only an
+     * inability to check at all returns ok:false, because the caller distinguishes "this file is
+     * bad" from "I could not tell", and must not treat the second as the first.
+     */
+    async validateSlashingProtection(content, pubkeys = []) {
+        const ctx = await this.getBeaconContext()
+        const root = ctx.ok ? ctx.genesisValidatorsRoot : null
+        const check = validateInterchange(content, { pubkeys, genesisValidatorsRoot: root })
+        const warnings = [...check.warnings]
+        if (!root) {
+            // Without the node's own root the wrong-chain check silently does not happen, which is
+            // the one failure this file is meant to catch. Say so rather than implying it passed.
+            warnings.push('This node\'s genesis validators root could not be read, so the file could not be confirmed to belong to this chain.')
+        }
+        return { ok: true, errors: check.errors, warnings, missing: check.missing, covered: check.covered, chainVerified: Boolean(root) }
+    }
+
+    /**
+     * Import keystores into a validator client.
+     *
+     * The slashing-protection payload is validated in the renderer before it gets here, but it is
+     * re-checked against the node's OWN genesis validators root, because that is the one fact the
+     * renderer cannot establish on its own and the one that makes a protection file meaningful.
+     *
+     * @param {string[]} keystores - keystore JSON, each already serialised to a string
+     * @param {string[]} passwords - positional, one per keystore
+     * @param {string|null} slashingProtection - EIP-3076 interchange JSON as a string
+     * @returns {Promise<{ ok, results?, error?, httpCode? }>}
+     */
+    async importValidatorKeys(serviceId, keystores = [], passwords = [], slashingProtection = null, { acknowledgedNeverSigned = false } = {}) {
+        const c = await this._validatorConfig(serviceId)
+        if (c.error) return { ok: false, error: c.error }
+        if (!keystores.length) return { ok: false, error: 'No keystores selected' }
+        if (keystores.length !== passwords.length) {
+            return { ok: false, error: 'Each keystore needs exactly one password' }
+        }
+
+        const pubkeys = keystores.map((k) => {
+            try { return String(JSON.parse(k)?.pubkey ?? '') } catch { return '' }
+        }).map((p) => (p && !p.startsWith('0x') ? `0x${p}` : p))
+
+        if (slashingProtection) {
+            const ctx = await this.getBeaconContext()
+            const check = validateInterchange(slashingProtection, {
+                pubkeys,
+                genesisValidatorsRoot: ctx.ok ? ctx.genesisValidatorsRoot : null,
+            })
+            if (!check.ok) return { ok: false, error: check.errors.join(' '), validation: check }
+        } else if (!acknowledgedNeverSigned) {
+            // Refused in the main process too, not just the UI: this is the gate that stands
+            // between a re-imported key and a slashing, so it must not live only in a modal.
+            return { ok: false, error: 'Importing without slashing protection requires confirming these keys have never signed' }
+        }
+
+        const r = await this._keymanagerRequest(serviceId, c.config, {
+            method: 'POST',
+            path: KEYSTORES_PATH,
+            body: buildImportBody(keystores, passwords, slashingProtection),
+            timeoutMs: 180_000,
+        })
+        if (r.error) return { ok: false, error: r.error }
+        if (r.httpCode !== 200) return { ok: false, error: keymanagerHttpError(r), httpCode: r.httpCode }
+
+        const parsed = parseImportKeystoresResponse(r.body, pubkeys)
+        if (parsed.error) return { ok: false, error: parsed.error }
+        return { ok: true, results: parsed.results }
+    }
+
+    /**
+     * Per-key exit eligibility, judged against live beacon state. Read-only: nothing is signed or
+     * sent. The UI must run this before offering the action, because the most common rejection
+     * (activated less than 256 epochs ago) is invisible without it.
+     */
+    async getExitPreflight(serviceId, pubkeys = [], { beaconUrl } = {}) {
+        if (!pubkeys.length) return { ok: false, error: 'No keys selected', checks: {} }
+        const ctx = await this.getBeaconContext({ beaconUrl })
+        if (!ctx.ok) return { ok: false, error: ctx.error, checks: {} }
+
+        const states = await this.getValidatorStates(pubkeys, { beaconUrl })
+        if (!states.ok) return { ok: false, error: states.error, checks: {} }
+
+        const checks = {}
+        for (const pubkey of pubkeys) {
+            const stat = states.states[String(pubkey).toLowerCase()] || {}
+            checks[pubkey] = exitEligibility(
+                { ...stat, pubkey },
+                { currentEpoch: ctx.currentEpoch, beaconSyncing: ctx.syncing, beaconOptimistic: ctx.optimistic },
+            )
+        }
+        return { ok: true, checks, currentEpoch: ctx.currentEpoch }
+    }
+
+    /**
+     * Sign and broadcast a voluntary exit for each key: the validator client signs, the beacon node
+     * gossips. Irreversible.
+     *
+     * The signed message never leaves the main process. It is a bearer credential with no expiry -
+     * anyone holding it can exit that validator at any later time - so it is not returned over IPC,
+     * not logged, and not written anywhere.
+     *
+     * Eligibility is re-checked here rather than trusted from the renderer's earlier preflight.
+     * @returns {Promise<{ ok, results?: { [pubkey]: { ok, error? } }, error? }>}
+     */
+    async submitVoluntaryExit(serviceId, pubkeys = [], { beaconUrl } = {}) {
+        const c = await this._validatorConfig(serviceId)
+        if (c.error) return { ok: false, error: c.error }
+        if (!pubkeys.length) return { ok: false, error: 'No keys selected' }
+
+        const preflight = await this.getExitPreflight(serviceId, pubkeys, { beaconUrl })
+        if (!preflight.ok) return { ok: false, error: preflight.error }
+
+        const base = (beaconUrl ? normalizeBeaconUrl(beaconUrl) : null) || await this._resolveInternalBeaconBase()
+        if (!base) return { ok: false, error: 'No beacon node available to broadcast the exit' }
+
+        const token = await this._keymanagerToken(serviceId, c.config)
+        if (token.error) return { ok: false, error: token.error }
+
+        const results = {}
+        // Sequential on purpose: each exit is irreversible, and a partial failure must leave a
+        // clear record of exactly which validators were submitted rather than a racing pile.
+        for (const pubkey of pubkeys) {
+            const eligible = preflight.checks[pubkey]
+            if (!eligible?.eligible) {
+                results[pubkey] = { ok: false, error: eligible?.reasons?.[0] || 'Not eligible to exit' }
+                continue
+            }
+            const signed = await this._keymanagerRequest(serviceId, c.config, {
+                method: 'POST', path: VOLUNTARY_EXIT_PATH(pubkey), token: token.token, timeoutMs: 30_000,
+            })
+            if (signed.error) { results[pubkey] = { ok: false, error: signed.error }; continue }
+            if (signed.httpCode !== 200) { results[pubkey] = { ok: false, error: keymanagerHttpError(signed) }; continue }
+
+            const parsedExit = parseSignedExit(signed.body)
+            if (!parsedExit.ok) { results[pubkey] = { ok: false, error: parsedExit.error }; continue }
+
+            // The beacon node is addressed by URL, not by container name, so the config is built
+            // directly instead of through the service-scoped helper. It still goes over stdin: the
+            // signed exit is a bearer credential and must not reach the process list.
+            const input = buildCurlConfig({
+                url: `${base}${EXIT_POOL_PATH}`,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: exitBroadcastBody(parsedExit.signedExit),
+            })
+            const res = await this.sshService.exec(buildSidecarStdinCommand(), true, { timeoutMs: 30_000, input })
+            const out = parseKeymanagerResponse(res.stdout)
+            results[pubkey] = isExitAccepted(out.httpCode)
+                ? { ok: true, message: exitStatusMessage(out.httpCode, out.body) }
+                : { ok: false, error: exitStatusMessage(out.httpCode, out.body) }
+        }
+        return { ok: true, results }
     }
 
     /** Shared tail of the per-key write ops: batch, then judge each response on its own status. */

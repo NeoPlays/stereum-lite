@@ -55,6 +55,9 @@ export function toValidatorStat(raw) {
         pubkey: String(v.pubkey || '').toLowerCase(),
         index: raw?.index != null ? Number(raw.index) : null,
         status: bucketStatus(raw?.status, v.slashed),
+        // The coarse bucket cannot tell `active_ongoing` from `active_exiting`, and re-exiting an
+        // already-exiting validator must be blocked, so the beacon's own wording is kept alongside.
+        rawStatus: typeof raw?.status === 'string' ? raw.status : null,
         slashed: v.slashed === true || v.slashed === 'true',
         balance: gweiToEth(raw?.balance),
         effectiveBalance: gweiToEth(v.effective_balance),

@@ -42,8 +42,17 @@ describe('actionDisabled', () => {
     })
 
     it('keeps a mutating action without a pipeline disabled even on a solo setup', () => {
-        expect(actionDisabled(exit, { row, soloEligible: true })).toBe(true)
-        expect(actionHint(exit, { row, soloEligible: true })).toBe('soon')
+        // Synthetic on purpose: this pins the RULE, not the current roster of actions. Asserting
+        // it against a real action would break every time one of them gets implemented, which is
+        // exactly what happened when exitValidator landed.
+        const unbuilt = { id: 'future', label: 'Future thing', mutating: true }
+        expect(actionDisabled(unbuilt, { row, soloEligible: true })).toBe(true)
+        expect(actionHint(unbuilt, { row, soloEligible: true })).toBe('soon')
+    })
+
+    it('enables the exit action on a solo setup now that it is implemented', () => {
+        expect(actionDisabled(exit, { row, soloEligible: true })).toBe(false)
+        expect(actionDisabled(exit, { row, soloEligible: false })).toBe(true)
     })
 
     it('disables graffiti when the client build has no graffiti route', () => {

@@ -58,9 +58,21 @@ describe('toValidatorStat', () => {
             validator: { pubkey: '0xABCD', effective_balance: '32000000000', slashed: false, withdrawal_credentials: '0x0100', activation_epoch: '1234' },
         }
         expect(toValidatorStat(raw)).toEqual({
-            pubkey: '0xabcd', index: 1274903, status: 'Active', slashed: false,
+            pubkey: '0xabcd', index: 1274903, status: 'Active', rawStatus: 'active_ongoing', slashed: false,
             balance: 32.0015, effectiveBalance: 32, withdrawalType: '0x01', activationEpoch: '1234',
         })
+    })
+
+    it('keeps the raw status, which the coarse bucket cannot express', () => {
+        // 'Active' covers both active_ongoing and active_exiting, but only one of those may be
+        // exited - so the exit gate reads rawStatus, not the bucket.
+        const exiting = toValidatorStat({ index: '1', status: 'active_exiting', validator: { pubkey: '0xa' } })
+        expect(exiting.status).toBe('Active')
+        expect(exiting.rawStatus).toBe('active_exiting')
+    })
+
+    it('leaves rawStatus null when the beacon omitted it', () => {
+        expect(toValidatorStat({ index: '1', validator: { pubkey: '0xa' } }).rawStatus).toBeNull()
     })
 })
 
