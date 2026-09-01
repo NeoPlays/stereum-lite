@@ -24,7 +24,7 @@ export function useValidatorKeys(nodeId) {
         // Carry prior beacon states across a (forced) reload so enriched columns / status filters
         // don't blank out mid-refresh; the caller re-enriches right after and updates them.
         const prev = cache[serviceId] || {}
-        const keep = { states: prev.states, statesSource: prev.statesSource }
+        const keep = { states: prev.states, statesSource: prev.statesSource, statesBase: prev.statesBase }
         cache[serviceId] = { loading: true, keys: [], error: '', ...keep }
         try {
             const res = await window.api.invoke('list-validators', resolveNodeId(), serviceId)
@@ -39,7 +39,8 @@ export function useValidatorKeys(nodeId) {
     /**
      * Enrich a service's already-loaded keys with on-chain beacon state (status/balance/etc.),
      * merged by pubkey. Only meaningful for on-chain holders (solo VC keys, Charon DV pubkeys) -
-     * the caller gates this off share holders. `beaconUrl` overrides the node's own beacon.
+     * the caller gates this off share holders. `beaconUrl` overrides the beacon the main process
+     * would otherwise resolve (this node's running CL, else the one its validator client names).
      */
     async function loadStates(serviceId, pubkeys, beaconUrl) {
         if (!serviceId || !pubkeys?.length) return
@@ -52,6 +53,7 @@ export function useValidatorKeys(nodeId) {
                 states: res?.ok ? (res.states || {}) : (cache[serviceId].states || {}),
                 statesError: res?.ok ? '' : (res?.error || 'Could not load validator stats'),
                 statesSource: res?.source,
+                statesBase: res?.base,   // which beacon answered (see _resolveBeaconBase)
             }
         } catch (e) {
             cache[serviceId] = { ...cache[serviceId], statesLoading: false, statesError: e?.message || 'Could not load validator stats' }

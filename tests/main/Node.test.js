@@ -1254,7 +1254,7 @@ describe('Node', () => {
                 if (opts?.input?.includes('/eth/v1/beacon/genesis') || cmd.includes('beacon/genesis')) return ok(BEACON_CTX)
                 return ok(`${keymanagerBody}\n${keymanagerCode}`)
             })
-            vi.spyOn(node, '_resolveInternalBeaconBase').mockResolvedValue('http://beacon:5052')
+            vi.spyOn(node, '_resolveBeaconBase').mockResolvedValue({ base: 'http://beacon:5052', source: 'node' })
             return inputs
         }
 
@@ -1319,7 +1319,7 @@ describe('Node', () => {
                 }
                 return ok(`{"data":[{"index":"1","status":"active_ongoing","balance":"32000000000","validator":{"pubkey":"${PK_A}","activation_epoch":"999","withdrawal_credentials":"0x0100"}}]}\n===VSTATE_HTTP===200\n===VSTATE_CHUNK===\n`)
             })
-            vi.spyOn(node, '_resolveInternalBeaconBase').mockResolvedValue('http://beacon:5052')
+            vi.spyOn(node, '_resolveBeaconBase').mockResolvedValue({ base: 'http://beacon:5052', source: 'node' })
 
             const r = await node.submitVoluntaryExit('svc', [PK_A])
             expect(r.ok).toBe(true)
@@ -1331,11 +1331,97 @@ describe('Node', () => {
         })
     })
 
+    describe('_resolveBeaconBase', () => {
+        const CL_ID = 'aaaaaaaa-0000-0000-0000-aaaaaaaaaaaa'
+        const VC_ID = 'bbbbbbbb-0000-0000-0000-bbbbbbbbbbbb'
+
+        // Services + container states, without the fetch plumbing.
+        function wire(services, containers) {
+            node.services = services
+            node.fetchContainerStatuses = vi.fn(async () => containers)
+        }
+
+        it('prefers a running consensus client on this node', () => {
+            wire(
+                [
+                    { id: CL_ID, config: { service: 'LighthouseBeaconService' } },
+                    { id: VC_ID, config: { service: 'LighthouseValidatorService', command: ['--beacon-nodes=http://remote:5052'] } },
+                ],
+                { [CL_ID]: { state: 'running' } },
+            )
+            return expect(node._resolveBeaconBase()).resolves.toEqual({ base: `http://stereum-${CL_ID}:5052`, source: 'node' })
+        })
+
+        it('falls back to the validator client config when the local CL is stopped', async () => {
+            wire(
+                [
+                    { id: CL_ID, config: { service: 'LighthouseBeaconService' } },
+                    {
+                        id: VC_ID,
+                        config: {
+                            service: 'LighthouseValidatorService',
+                            // Dead local CL listed first must not win over the remote one.
+                            command: [`--beacon-nodes=http://stereum-${CL_ID}:5052,http://remote:5052`],
+                        },
+                    },
+                ],
+                { [CL_ID]: { state: 'exited' } },
+            )
+            const r = await node._resolveBeaconBase()
+            expect(r).toEqual({ base: 'http://remote:5052', source: 'validator-config' })
+        })
+
+        it('falls back on a validator-only node with no consensus client at all', async () => {
+            wire([{ id: VC_ID, config: { service: 'TekuValidatorService', command: ['--beacon-node-api-endpoint=https://beacon.example.com'] } }], {})
+            const r = await node._resolveBeaconBase()
+            expect(r).toEqual({ base: 'https://beacon.example.com', source: 'validator-config' })
+        })
+
+        it('resolves nothing when no service names a usable beacon', async () => {
+            wire([{ id: VC_ID, config: { service: 'LighthouseValidatorService', command: ['--beacon-nodes=http://127.0.0.1:5052'] } }], {})
+            expect(await node._resolveBeaconBase()).toEqual({ base: null, source: null })
+        })
+    })
+
+    describe('getValidatorStates beacon source', () => {
+        const PK_A = '0x' + 'a'.repeat(96)
+        const RESPONSE = `{"data":[{"index":"7","status":"active_ongoing","balance":"32000000000","validator":{"pubkey":"${PK_A}","activation_epoch":"1","withdrawal_credentials":"0x0100"}}]}\n===VSTATE_HTTP===200\n===VSTATE_CHUNK===\n`
+
+        it('reports the fallback source and the beacon it used', async () => {
+            vi.spyOn(node, '_resolveBeaconBase').mockResolvedValue({ base: 'http://remote:5052', source: 'validator-config' })
+            node.sshService.exec = vi.fn(async () => ok(RESPONSE))
+            const r = await node.getValidatorStates([PK_A])
+            expect(r.ok).toBe(true)
+            expect(r.states[PK_A].index).toBe(7)
+            expect(r.source).toBe('validator-config')
+            expect(r.base).toBe('http://remote:5052')
+            expect(node.sshService.exec.mock.calls[0][0]).toContain('http://remote:5052')
+        })
+
+        it('an explicit override still wins over the fallback', async () => {
+            const resolve = vi.spyOn(node, '_resolveBeaconBase')
+            node.sshService.exec = vi.fn(async () => ok(RESPONSE))
+            const r = await node.getValidatorStates([PK_A], { beaconUrl: 'http://chosen:5052' })
+            expect(r.source).toBe('custom')
+            expect(r.base).toBe('http://chosen:5052')
+            expect(resolve).not.toHaveBeenCalled()
+        })
+
+        it('errors naming all three sources when none resolves', async () => {
+            vi.spyOn(node, '_resolveBeaconBase').mockResolvedValue({ base: null, source: null })
+            const r = await node.getValidatorStates([PK_A])
+            expect(r.ok).toBe(false)
+            expect(r.error).toMatch(/no running consensus client/i)
+            expect(r.error).toMatch(/validator client/i)
+            expect(r.error).toMatch(/stats beacon/i)
+        })
+    })
+
     describe('getBeaconContext', () => {
         it('reads the chain root and head epoch from the node beacon', async () => {
             node.sshService.exec = vi.fn(async () =>
                 ok('{"data":{"genesis_validators_root":"0xbeef"}}\n===BCTX===\n{"data":{"head_slot":"640","is_syncing":false,"is_optimistic":false}}'))
-            vi.spyOn(node, '_resolveInternalBeaconBase').mockResolvedValue('http://beacon:5052')
+            vi.spyOn(node, '_resolveBeaconBase').mockResolvedValue({ base: 'http://beacon:5052', source: 'node' })
             const r = await node.getBeaconContext()
             expect(r.ok).toBe(true)
             expect(r.genesisValidatorsRoot).toBe('0xbeef')
@@ -1345,7 +1431,7 @@ describe('Node', () => {
 
         it('reports failure when the beacon answers nothing usable', async () => {
             node.sshService.exec = vi.fn(async () => ok('not json'))
-            vi.spyOn(node, '_resolveInternalBeaconBase').mockResolvedValue('http://beacon:5052')
+            vi.spyOn(node, '_resolveBeaconBase').mockResolvedValue({ base: 'http://beacon:5052', source: 'node' })
             const r = await node.getBeaconContext()
             expect(r.ok).toBe(false)
         })

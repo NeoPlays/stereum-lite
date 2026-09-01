@@ -10,7 +10,7 @@
                     <h1 class="page-title">Validator keys</h1>
                 </div>
                 <div class="header-actions">
-                    <button class="btn-ghost" @click="openBeaconModal" :title="beaconUrl || `Using this node's beacon`">
+                    <button class="btn-ghost" @click="openBeaconModal" :title="beaconTitle">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M12 3a9 9 0 0 1 0 18M12 3a9 9 0 0 0 0 18" /></svg>
                         Stats beacon<span v-if="beaconUrl" class="src-dot"></span>
                     </button>
@@ -74,10 +74,10 @@
                         </button>
                     </div>
 
-                    <div v-if="statsLoading || statsError || st.statesSource === 'custom'" class="stats-line" :class="{ error: !!statsError }">
+                    <div v-if="statsLoading || statsError || statsSourceNote" class="stats-line" :class="{ error: !!statsError }">
                         <template v-if="statsLoading">Loading validator stats from the beacon…</template>
                         <template v-else-if="statsError">{{ statsError }}</template>
-                        <template v-else>Stats read from a custom beacon URL</template>
+                        <template v-else>{{ statsSourceNote }}</template>
                     </div>
 
                     <!-- Table card -->
@@ -219,7 +219,8 @@
                         </button>
                     </header>
                     <div class="bm-body">
-                        <p class="bm-hint">Which beacon node validator stats are read from. Leave empty to use this node's own beacon (the connected node's first running consensus client).</p>
+                        <p class="bm-hint">Which beacon node validator stats are read from. Leave empty and this node decides: its first running consensus client, or - if none is running - the beacon its own validator client is configured against.</p>
+                        <p v-if="!beaconUrl && st.statesSource === 'validator-config'" class="bm-hint">Currently falling back to <span class="mono">{{ st.statesBase }}</span>, taken from the validator client's config.</p>
                         <p class="bm-hint bm-warn">Your validator public keys are sent to this URL to look up their on-chain state. Pubkeys are public data, but a third-party endpoint could correlate them to this node - use a beacon you trust.</p>
                         <input v-model="beaconDraft" class="bm-input mono" type="text" placeholder="http://host:5052  (empty = this node's beacon)" autocomplete="off" spellcheck="false" @keydown.enter="saveBeacon" />
                     </div>
@@ -371,6 +372,19 @@ const graffitiSupported = computed(() => st.value.graffitiSupported === true)
 const soloEligible = computed(() => Boolean(activeHolder.value?.soloEligible))
 const statsLoading = computed(() => Boolean(st.value.statesLoading))
 const statsError = computed(() => st.value.statesError || '')
+
+// Which beacon answered, when it wasn't this node's own running CL. The fallback names its URL:
+// the user did not pick it, and a stale endpoint in the VC's config is otherwise invisible.
+const statsSourceNote = computed(() => {
+    const base = st.value.statesBase
+    if (st.value.statesSource === 'custom') return 'Stats read from a custom beacon URL'
+    if (st.value.statesSource === 'validator-config') {
+        return `No consensus client running here - stats read from the beacon the validator client is configured against${base ? ` (${base})` : ''}`
+    }
+    return ''
+})
+
+const beaconTitle = computed(() => beaconUrl.value || statsSourceNote.value || `Using this node's beacon`)
 
 const visible = computed(() => {
     const q = queryD.value.toLowerCase()

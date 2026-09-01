@@ -9,6 +9,7 @@ import {
     toValidatorStat,
     buildBeaconValidatorsScript,
     parseBeaconStates,
+    configuredBeaconBases,
 } from '@main/nodes/beaconValidators'
 
 describe('normalizeBeaconUrl', () => {
@@ -121,5 +122,73 @@ describe('parseBeaconStates', () => {
         const { states, codes } = parseBeaconStates(stdout)
         expect(Object.keys(states)).toEqual(['0xcc'])
         expect(codes).toEqual([500, 200])
+    })
+})
+
+describe('configuredBeaconBases', () => {
+    const svc = (id, service, command, env) => ({ id, config: { service, command, env } })
+    const RUNNING = { state: 'running' }
+    const CL_ID = 'aaaaaaaa-0000-0000-0000-aaaaaaaaaaaa'
+
+    it('reads the endpoint out of each validator client flag form', () => {
+        const cases = [
+            ['LighthouseValidatorService', ['--beacon-nodes=http://remote:5052']],
+            ['LodestarValidatorService', ['--beaconNodes=http://remote:5052']],
+            ['TekuValidatorService', ['--beacon-node-api-endpoint=http://remote:5052']],
+            ['NimbusValidatorService', ['--beacon-node=http://remote:5052']],
+            ['PrysmValidatorService', ['--beacon-rest-api-provider=http://remote:5052']],
+            ['CharonService', ['--beacon-node-endpoints=http://remote:5052']],
+            // Space-separated is just as valid as `=`.
+            ['LighthouseValidatorService', ['--beacon-nodes', 'http://remote:5052']],
+        ]
+        for (const [service, command] of cases) {
+            expect(configuredBeaconBases([svc('v1', service, command)])).toEqual(['http://remote:5052'])
+        }
+    })
+
+    it('splits a comma-separated failover list into ordered candidates', () => {
+        const bases = configuredBeaconBases([
+            svc('v1', 'TekuValidatorService', ['--beacon-node-api-endpoint=http://a:5052,http://b:5052']),
+        ])
+        expect(bases).toEqual(['http://a:5052', 'http://b:5052'])
+    })
+
+    it('ignores Prysm gRPC provider, which cannot answer a REST query', () => {
+        expect(configuredBeaconBases([
+            svc('v1', 'PrysmValidatorService', ['--beacon-rpc-provider=stereum-x:4000']),
+        ])).toEqual([])
+    })
+
+    it('drops a local container endpoint whose container is not running', () => {
+        const services = [svc('v1', 'LighthouseValidatorService', [`--beacon-nodes=http://stereum-${CL_ID}:5052`])]
+        expect(configuredBeaconBases(services, { [CL_ID]: { state: 'exited' } })).toEqual([])
+        // Running, or simply unknown to us, is kept.
+        expect(configuredBeaconBases(services, { [CL_ID]: RUNNING })).toEqual([`http://stereum-${CL_ID}:5052`])
+        expect(configuredBeaconBases(services, {})).toEqual([`http://stereum-${CL_ID}:5052`])
+    })
+
+    it('drops loopback, which from the sidecar container means the sidecar itself', () => {
+        expect(configuredBeaconBases([
+            svc('v1', 'LighthouseValidatorService', ['--beacon-nodes=http://127.0.0.1:5052']),
+            svc('v2', 'LodestarValidatorService', ['--beaconNodes=http://localhost:5052']),
+        ])).toEqual([])
+    })
+
+    it('falls back to an ExternalConsensusService link, after the validator client flags', () => {
+        const bases = configuredBeaconBases([
+            svc('ext', 'ExternalConsensusService', [], { link: 'https://beacon.example.com/' }),
+            svc('v1', 'LighthouseValidatorService', ['--beacon-nodes=http://remote:5052']),
+        ])
+        expect(bases).toEqual(['http://remote:5052', 'https://beacon.example.com'])
+    })
+
+    it('dedupes the same endpoint named by several clients, and ignores junk', () => {
+        expect(configuredBeaconBases([
+            svc('v1', 'LighthouseValidatorService', ['--beacon-nodes=http://remote:5052']),
+            svc('v2', 'NimbusValidatorService', ['--beacon-node=http://remote:5052']),
+            svc('v3', 'LodestarValidatorService', ['--beaconNodes=not a url']),
+            svc('v4', 'GethService', ['--http']),
+            { id: 'v5' },
+        ])).toEqual(['http://remote:5052'])
     })
 })

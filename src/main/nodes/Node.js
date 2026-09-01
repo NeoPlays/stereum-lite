@@ -8,7 +8,9 @@ import {
     PROMETHEUS_SERVICE, PROMETHEUS_PORT,
     CLIENT_REGISTRY, shellQuote,
 } from "@main/nodes/metrics";
-import { normalizeBeaconUrl, buildBeaconValidatorsScript, parseBeaconStates } from "@main/nodes/beaconValidators";
+import {
+    normalizeBeaconUrl, buildBeaconValidatorsScript, parseBeaconStates, configuredBeaconBases,
+} from "@main/nodes/beaconValidators";
 import {
     isResyncable, resolveDataDir, isSafeDataDir, updateSyncCommand, supportsCheckpointSync,
 } from "@main/nodes/resync";
@@ -37,6 +39,9 @@ import log from 'electron-log';
 
 // Interval for re-reading a running playbook's log to stream live sub-tasks (task context only).
 const PLAYBOOK_POLL_MS = 2000;
+
+// Names all three sources so the user knows which one to fix.
+const NO_BEACON_ERROR = 'No beacon available: this node has no running consensus client, its validator client names none, and no stats beacon is set';
 
 /**
  * Represents a remote node managed via SSH
@@ -519,18 +524,20 @@ export class Node {
 
     /**
      * Chain context needed to judge an import or an exit: which chain this node is on, how far
-     * along it is, and whether its view can be trusted. Read from the node's own beacon (or the
-     * stats-beacon override) in one sidecar.
+     * along it is, and whether its view can be trusted. Read in one sidecar from the stats-beacon
+     * override, else whatever `_resolveBeaconBase` picks.
      *
      * `genesisValidatorsRoot` is what makes a slashing-protection file verifiable: a file from
-     * another chain describes signatures that never happened here.
-     * @returns {Promise<{ ok, genesisValidatorsRoot?, currentEpoch?, syncing?, optimistic?, error? }>}
+     * another chain describes signatures that never happened here. Which beacon supplied it is
+     * part of the answer, hence `source`/`base`.
+     * @returns {Promise<{ ok, genesisValidatorsRoot?, currentEpoch?, syncing?, optimistic?, source?, base?, error? }>}
      */
     async getBeaconContext({ beaconUrl } = {}) {
         const override = beaconUrl ? normalizeBeaconUrl(beaconUrl) : null
         if (beaconUrl && !override) return { ok: false, error: 'Invalid beacon URL' }
-        const base = override || await this._resolveInternalBeaconBase()
-        if (!base) return { ok: false, error: 'No running consensus client on this node and no stats beacon set' }
+        const resolved = override ? { base: override, source: 'custom' } : await this._resolveBeaconBase()
+        const { base, source } = resolved
+        if (!base) return { ok: false, error: NO_BEACON_ERROR }
 
         const script = [
             `curl -sS -m 10 '${base}/eth/v1/beacon/genesis' -w '\\n===BCTX===\\n'`,
@@ -555,9 +562,9 @@ export class Node {
         } catch { /* left as unknown */ }
 
         if (genesisValidatorsRoot === null && currentEpoch === null) {
-            return { ok: false, error: 'Beacon node did not answer (is it reachable and synced?)' }
+            return { ok: false, error: 'Beacon node did not answer (is it reachable and synced?)', source, base }
         }
-        return { ok: true, genesisValidatorsRoot, currentEpoch, syncing, optimistic }
+        return { ok: true, genesisValidatorsRoot, currentEpoch, syncing, optimistic, source, base }
     }
 
     /**
@@ -674,7 +681,7 @@ export class Node {
         const preflight = await this.getExitPreflight(serviceId, pubkeys, { beaconUrl })
         if (!preflight.ok) return { ok: false, error: preflight.error }
 
-        const base = (beaconUrl ? normalizeBeaconUrl(beaconUrl) : null) || await this._resolveInternalBeaconBase()
+        const base = (beaconUrl ? normalizeBeaconUrl(beaconUrl) : null) || (await this._resolveBeaconBase()).base
         if (!base) return { ok: false, error: 'No beacon node available to broadcast the exit' }
 
         const token = await this._keymanagerToken(serviceId, c.config)
@@ -735,46 +742,57 @@ export class Node {
         return { ok: true, results }
     }
 
-    /** Base URL of the first running consensus client's beacon REST API (`stereum-<id>:<port>`), or null. */
-    async _resolveInternalBeaconBase() {
+    /**
+     * Which beacon to read when the user set no stats-beacon override, best-first: this node's
+     * first RUNNING consensus client (`node`), else the endpoint its own validator client is
+     * configured against (`validator-config`) - a VC-only host still knows where a beacon is,
+     * and on-chain state is global. `source` comes along because the UI must say when the
+     * beacon was picked for the user rather than by them.
+     * @returns {Promise<{ base: string|null, source: 'node'|'validator-config'|null }>}
+     */
+    async _resolveBeaconBase() {
         if (!this.services?.length) await this.fetchServices()
         if (this.services.some(s => !s.config)) await this.fetchServiceConfigs()
         const containers = await this.fetchContainerStatuses()
         for (const s of this.services) {
             const reg = CLIENT_REGISTRY[s.config?.service]
             if (reg?.role === 'consensus' && containers[s.id]?.state === 'running') {
-                return `http://stereum-${s.id}:${reg.port}`
+                return { base: `http://stereum-${s.id}:${reg.port}`, source: 'node' }
             }
         }
-        return null
+        const [configured] = configuredBeaconBases(this.services, containers)
+        return configured ? { base: configured, source: 'validator-config' } : { base: null, source: null }
     }
 
     /**
      * On-chain state for a set of validator pubkeys via the beacon REST API
-     * (`POST /eth/v1/beacon/states/head/validators`, chunked, one curl sidecar). On-chain state
-     * is global, so ANY synced beacon answers for any pubkey - by default the node's own first
-     * running consensus client, or a user-set stats-beacon URL override. Read-only.
+     * (`POST /eth/v1/beacon/states/head/validators`, chunked, one curl sidecar). ANY reachable
+     * beacon answers for any pubkey: the stats-beacon override, else `_resolveBeaconBase`'s
+     * pick. Read-only.
      * @param {string[]} pubkeys - 0x validator pubkeys (solo VC keys or Charon DV pubkeys)
      * @param {{ beaconUrl?: string }} opts - beaconUrl overrides the node's own beacon
-     * @returns {Promise<{ ok, states: { [pubkey]: object }, source?: 'custom'|'node', error? }>}
+     * @returns {Promise<{ ok, states: { [pubkey]: object }, source?: BeaconSource, base?: string, error? }>}
      */
     async getValidatorStates(pubkeys, { beaconUrl } = {}) {
         const override = beaconUrl ? normalizeBeaconUrl(beaconUrl) : null
         if (beaconUrl && !override) return { ok: false, error: 'Invalid beacon URL', states: {} }
-        const base = override || await this._resolveInternalBeaconBase()
-        if (!base) return { ok: false, error: 'No stats beacon set and no running consensus client on this node', states: {} }
+        const resolved = override ? { base: override, source: 'custom' } : await this._resolveBeaconBase()
+        const { base, source } = resolved
+        if (!base) return { ok: false, error: NO_BEACON_ERROR, states: {} }
+        // `base` rides along so the UI can name a beacon the user never chose.
+        const origin = { source, base }
         const script = buildBeaconValidatorsScript(base, pubkeys)
-        if (!script) return { ok: true, states: {}, source: override ? 'custom' : 'node' } // no valid pubkeys
+        if (!script) return { ok: true, states: {}, ...origin } // no valid pubkeys
         const res = await this.sshService.exec(wrapSidecar(script), true, { timeoutMs: 30_000 })
-        if (res.rc !== 0 && res.rc !== null) return { ok: false, error: 'Beacon query failed (is the beacon reachable?)', states: {} }
+        if (res.rc !== 0 && res.rc !== null) return { ok: false, error: 'Beacon query failed (is the beacon reachable?)', states: {}, ...origin }
         // res.rc is the trailing printf's status, never curl's - so detect failure from the per-chunk
         // HTTP codes: if every chunk returned non-2xx (incl. 000 = never connected), surface an error.
         const { states, codes } = parseBeaconStates(res.stdout)
         if (codes.length && !codes.some((c) => c >= 200 && c < 300)) {
             const c = codes[0]
-            return { ok: false, error: c > 0 ? `Beacon returned HTTP ${c}` : 'Beacon unreachable or timed out', states: {} }
+            return { ok: false, error: c > 0 ? `Beacon returned HTTP ${c}` : 'Beacon unreachable or timed out', states: {}, ...origin }
         }
-        return { ok: true, states, source: override ? 'custom' : 'node' }
+        return { ok: true, states, ...origin }
     }
 
     /**

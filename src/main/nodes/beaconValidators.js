@@ -113,3 +113,77 @@ export function parseBeaconStates(stdout) {
     }
     return { states, codes }
 }
+
+// Command flags carrying the beacon REST endpoint a client talks to. Names taken from upstream
+// stereum's `*ValidatorService.js`, which wrote these configs. Prysm's `--beacon-rpc-provider`
+// is excluded: same value as the REST flag, but gRPC cannot answer a REST query.
+export const BEACON_ENDPOINT_FLAGS = {
+    LighthouseValidatorService: ['--beacon-nodes'],
+    PrysmValidatorService: ['--beacon-rest-api-provider'],
+    TekuValidatorService: ['--beacon-node-api-endpoint', '--beacon-node-api-endpoints'],
+    NimbusValidatorService: ['--beacon-node'],
+    LodestarValidatorService: ['--beaconNodes'],
+    CharonService: ['--beacon-node-endpoints'],   // its upstream beacons, not the proxy
+}
+
+// From the sidecar container, loopback is the sidecar itself - never a beacon.
+const LOOPBACK_HOST = /^(localhost|127(?:\.\d+){3}|\[?::1\]?|0\.0\.0\.0)$/i
+
+/** Every occurrence of `--flag=value` / `--flag value`, comma-split (clients accept lists). */
+function flagValues(command, flagNames) {
+    const cmd = Array.isArray(command) ? command.map(String) : []
+    const out = []
+    for (let i = 0; i < cmd.length; i++) {
+        for (const flag of flagNames) {
+            let raw
+            if (cmd[i] === flag) raw = cmd[i + 1]
+            else if (cmd[i].startsWith(flag + '=')) raw = cmd[i].slice(flag.length + 1)
+            if (raw != null) out.push(...String(raw).split(',').map((v) => v.trim()).filter(Boolean))
+        }
+    }
+    return out
+}
+
+/** Host of an http(s) URL, port stripped, lowercased. */
+function hostOf(url) {
+    const m = String(url).match(/^https?:\/\/([^/]+)/i)
+    if (!m) return ''
+    return m[1].replace(/:\d+$/, '').toLowerCase()
+}
+
+/**
+ * Beacons this node's own services are configured against, best-first: what the validator clients
+ * (and Charon) point at, then an `ExternalConsensusService` link (stereum's "beacon lives
+ * elsewhere" service - URL in `env.link`, no container). The fallback when no local consensus
+ * client runs. Candidates that cannot answer are dropped, not left to time out: loopback, and a
+ * `stereum-<id>` host whose container is down (usually the stopped CL that put us here).
+ * @param {Array<{ id: string, config?: object }>} services
+ * @param {{ [serviceId]: { state: string } }} containerStatuses - from Node.fetchContainerStatuses
+ * @returns {string[]} normalized, deduped base URLs
+ */
+export function configuredBeaconBases(services = [], containerStatuses = {}) {
+    const raw = []
+    for (const svc of Array.isArray(services) ? services : []) {
+        const flags = BEACON_ENDPOINT_FLAGS[svc?.config?.service]
+        if (flags) raw.push(...flagValues(svc.config?.command, flags))
+    }
+    for (const svc of Array.isArray(services) ? services : []) {
+        if (svc?.config?.service === 'ExternalConsensusService' && svc.config?.env?.link) {
+            raw.push(String(svc.config.env.link))
+        }
+    }
+
+    const out = []
+    const seen = new Set()
+    for (const candidate of raw) {
+        const base = normalizeBeaconUrl(candidate)
+        if (!base || seen.has(base)) continue
+        const host = hostOf(base)
+        if (LOOPBACK_HOST.test(host)) continue
+        const local = host.match(/^stereum-([a-f0-9-]{36})$/)
+        if (local && containerStatuses?.[local[1]] && containerStatuses[local[1]].state !== 'running') continue
+        seen.add(base)
+        out.push(base)
+    }
+    return out
+}
